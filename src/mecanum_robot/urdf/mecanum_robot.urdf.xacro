@@ -1,0 +1,187 @@
+<?xml version="1.0"?>
+<robot name="mecanum_robot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- Chassis -->
+  <xacro:property name="chassis_length" value="0.2032" />    <!-- left-to-right (X) -->
+  <xacro:property name="chassis_width" value="0.254" />    <!-- front-to-back (Y) -->
+  <xacro:property name="chassis_height" value="0.091397" />     <!-- total height of all 3 tiers -->
+  <xacro:property name="chassis_z_offset" value="0.025103" />   <!-- ground to bottom of lowest tier -->
+
+  <!-- Wheel -->
+  <xacro:property name="wheel_radius" value="0.034" />     
+  <xacro:property name="wheel_width" value="0.03" />       
+
+  <!-- Wheel position (distance from center of robot to center of wheel) -->
+  <xacro:property name="wheelbase" value="0.1726" />            <!-- front-to-rear wheel center distance -->
+  <xacro:property name="track_width" value="0.1784" />          <!-- left-to-right wheel center distance -->
+
+  <!-- ToF sensor positions (distance from base_link center to each sensor face) -->
+  <xacro:property name="tof_front_x" value="0" />               <!-- front sensors X offset -->
+  <xacro:property name="tof_front_y" value="0.1246" />          <!-- front sensors Y offset from center -->
+  <xacro:property name="tof_rear_right_x" value="0.0275" />     <!-- rear right sensor X offset -->
+  <xacro:property name="tof_rear_left_x" value="-0.0275" />     <!-- rear left sensor X offset -->
+  <xacro:property name="tof_rear_y" value="-0.1193" />          <!-- rear sensor Y offset -->
+  <xacro:property name="tof_side_x" value="-0.1012" />          <!-- side sensor X offset -->
+  <xacro:property name="tof_side_y" value="0.0003" />           <!-- right sensor Y offset -->
+  <xacro:property name="tof_z" value="0.0793" />                <!-- height of all ToF sensors from ground -->
+
+  <!-- Mass (kg) -->
+  <xacro:property name="chassis_mass" value="1.5" /> <!-- TODO: Weigh this IRL-->
+  <xacro:property name="wheel_mass" value="0.05" />  <!-- TODO: Weigh this IRL-->
+
+  <!-- Origin: center of footprint, on the ground plane -->
+
+  <link name="base_link" />
+
+  <!-- Chassis visual/collision attached to base_link via fixed joint -->
+  <link name="chassis_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://mecanum_robot/meshes/Chassis.STL"/>
+      </geometry>
+      <material name="acrylic_clear">
+        <color rgba="0.7 0.7 0.8 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${0.0251 + (0.1201 - 0.0251) / 2}" rpy="0 0 0" />
+      <geometry>
+        <box size="${chassis_length} ${chassis_width} ${chassis_height}" />
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="${chassis_mass}" />
+      <origin xyz="0 0 ${chassis_height / 2}" rpy="0 0 0" />
+      <!-- Box inertia approximation — replace with SolidWorks values if you have them -->
+      <inertia
+        ixx="0.0079" ixy="0" ixz="0"
+        iyy="0.0064" iyz="0.0003" izz="0.0065" />
+    </inertial>
+  </link>
+
+  <joint name="base_to_chassis" type="fixed">
+    <parent link="base_link" />
+    <child link="chassis_link" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+
+
+  <!-- Wheel visual/collision attached to base_link via fixed joint 4x -->
+
+  <xacro:macro name="mecanum_wheel" params="name x_pos y_pos rotation">
+    <link name="${name}_wheel_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="0 ${rotation} 0" />
+        <geometry>
+          <mesh filename="package://mecanum_robot/meshes/Wheel.STL"/>
+        </geometry>
+        <material name="wheel_black">
+          <color rgba="0.2 0.2 0.2 1.0" />
+        </material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="${pi/2} 0 0" />
+        <geometry>
+          <cylinder radius="${wheel_radius}" length="${wheel_width}" />
+        </geometry>
+      </collision>
+      <inertial>
+        <mass value="${wheel_mass}" />
+        <origin xyz="0 0 0" rpy="0 0 0" />
+        <!-- Cylinder inertia -->
+        <inertia
+          ixx="0.0001" ixy="0" ixz="0" 
+          iyy="0" iyz="0" izz="0" />
+      </inertial>
+    </link>
+
+    <joint name="${name}_wheel_joint" type="continuous">
+      <parent link="base_link" />
+      <child link="${name}_wheel_link" />
+      <origin xyz="${x_pos} ${y_pos} ${wheel_radius}" rpy="0 0 0" />
+      <axis xyz="1 0 0" />
+      <dynamics damping="0.01" friction="0.1" />
+    </joint>
+  </xacro:macro>
+
+  <!-- Instantiate the 4 wheels -->
+  <xacro:mecanum_wheel name="front_right"  y_pos="${wheelbase/2}"  x_pos="${track_width/2}" rotation="${pi}"/>
+  <xacro:mecanum_wheel name="back_right" y_pos="${-wheelbase/2}"  x_pos="${track_width/2}" rotation="${pi}"/>
+  <xacro:mecanum_wheel name="front_left"   y_pos="${wheelbase/2}" x_pos="${-track_width/2}" rotation="0"/>
+  <xacro:mecanum_wheel name="back_left"  y_pos="${-wheelbase/2}" x_pos="${-track_width/2}" rotation="0"/>
+
+
+  <!-- ========================== -->
+  <!--     TOF SENSOR MACRO       -->
+  <!-- ========================== -->
+
+  <xacro:macro name="tof_sensor" params="name x_pos y_pos yaw">
+    <link name="${name}_tof_link">
+    
+    </link>
+
+    <joint name="${name}_tof_joint" type="fixed">
+      <parent link="base_link" />
+      <child link="${name}_tof_link" />
+      <origin xyz="${x_pos} ${y_pos} ${tof_z}" rpy="0 0 ${yaw}" />
+    </joint>
+  </xacro:macro>
+
+  <!-- Instantiate 5 ToF sensors -->
+  <!-- yaw: 0 = facing +X (forward), pi/2 = facing +Y (left), pi = facing back, -pi/2 = facing right -->
+  <xacro:tof_sensor name="front"       x_pos="${tof_front_x}"      y_pos="${tof_front_y}"   yaw="${pi/2}" />
+  <xacro:tof_sensor name="rear_right"  x_pos="${tof_rear_right_x}" y_pos="${tof_rear_y}"    yaw="${-pi/2}" />
+  <xacro:tof_sensor name="rear_left"   x_pos="${tof_rear_left_x}"  y_pos="${tof_rear_y}"    yaw="${-pi/2}" />
+  <xacro:tof_sensor name="side"        x_pos="${tof_side_x}"       y_pos="${tof_side_y}"    yaw="${pi}" />
+
+
+  <!-- ========================== -->
+  <!--     GAZEBO PLUGIN          -->
+  <!-- ========================== -->
+  <!-- Planar move plugin for mecanum omnidirectional control -->
+  <!-- Accepts cmd_vel with linear.x, linear.y, and angular.z -->
+
+  <gazebo>
+    <plugin name="mecanum_controller" filename="libgazebo_ros_planar_move.so">
+      <ros>
+        <namespace>/</namespace>
+        <remapping>cmd_vel:=cmd_vel</remapping>
+        <remapping>odom:=odom</remapping>
+      </ros>
+      <update_rate>50</update_rate>
+      <publish_rate>50</publish_rate>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_link</robot_base_frame>
+    </plugin>
+  </gazebo>
+
+  <!-- Gazebo material colors (Gazebo ignores URDF materials, needs its own) -->
+  <gazebo reference="chassis_link">
+    <material>Gazebo/Grey</material>
+  </gazebo>
+
+  <gazebo reference="front_left_wheel_link">
+    <material>Gazebo/DarkGrey</material>
+    <mu1>1.0</mu1>
+    <mu2>1.0</mu2>
+  </gazebo>
+  <gazebo reference="front_right_wheel_link">
+    <material>Gazebo/DarkGrey</material>
+    <mu1>1.0</mu1>
+    <mu2>1.0</mu2>
+  </gazebo>
+  <gazebo reference="rear_left_wheel_link">
+    <material>Gazebo/DarkGrey</material>
+    <mu1>1.0</mu1>
+    <mu2>1.0</mu2>
+  </gazebo>
+  <gazebo reference="rear_right_wheel_link">
+    <material>Gazebo/DarkGrey</material>
+    <mu1>1.0</mu1>
+    <mu2>1.0</mu2>
+  </gazebo>
+
+</robot>

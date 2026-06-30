@@ -47,16 +47,15 @@
     <collision>
       <origin xyz="0 0 ${0.0251 + (0.1201 - 0.0251) / 2}" rpy="0 0 0" />
       <geometry>
-        <box size="${chassis_length} ${chassis_width} ${chassis_height}" />
+        <box size="${chassis_width} ${chassis_length} ${chassis_height}" />
       </geometry>
     </collision>
     <inertial>
       <mass value="${chassis_mass}" />
-      <origin xyz="0 0 ${chassis_height / 2}" rpy="0 0 0" />
-      <!-- Box inertia approximation — replace with SolidWorks values if you have them -->
+      <origin xyz="0 0 ${0.0251 + (0.1201 - 0.0251) / 2}" rpy="0 0 0" />
       <inertia
-        ixx="0.0079" ixy="0" ixz="0"
-        iyy="0.0064" iyz="0.0003" izz="0.0065" />
+        ixx="0.0064" ixy="0" ixz="0"
+        iyy="0.0079" iyz="0" izz="0.0065" />
     </inertial>
   </link>
 
@@ -80,12 +79,6 @@
           <color rgba="0.2 0.2 0.2 1.0" />
         </material>
       </visual>
-      <collision>
-        <origin xyz="0 0 0" rpy="${pi/2} 0 0" />
-        <geometry>
-          <cylinder radius="${wheel_radius}" length="${wheel_width}" />
-        </geometry>
-      </collision>
       <inertial>
         <mass value="${wheel_mass}" />
         <origin xyz="0 0 0" rpy="0 0 0" />
@@ -133,10 +126,10 @@
         <ray>
           <scan>
             <horizontal>
-              <samples>1</samples>
+              <samples>5</samples>
               <resolution>1</resolution>
-              <min_angle>0</min_angle>
-              <max_angle>0</max_angle>
+              <min_angle>-0.22</min_angle>
+              <max_angle>0.22</max_angle>
             </horizontal>
           </scan>
           <range>
@@ -189,30 +182,36 @@
     </plugin>
   </gazebo>
 
-  <!-- Gazebo material colors (Gazebo ignores URDF materials, needs its own) -->
-  <gazebo reference="chassis_link">
-    <material>Gazebo/Grey</material>
-  </gazebo>
-
   <gazebo reference="front_left_wheel_link">
     <material>Gazebo/DarkGrey</material>
-    <mu1>1.0</mu1>
-    <mu2>1.0</mu2>
+    <mu1>0.001</mu1>
+    <mu2>0.001</mu2>
+    <gravity>false</gravity>
   </gazebo>
   <gazebo reference="front_right_wheel_link">
     <material>Gazebo/DarkGrey</material>
-    <mu1>1.0</mu1>
-    <mu2>1.0</mu2>
+    <mu1>0.001</mu1>
+    <mu2>0.001</mu2>
+    <gravity>false</gravity>
   </gazebo>
-  <gazebo reference="rear_left_wheel_link">
+  <gazebo reference="back_left_wheel_link">
     <material>Gazebo/DarkGrey</material>
-    <mu1>1.0</mu1>
-    <mu2>1.0</mu2>
+    <mu1>0.001</mu1>
+    <mu2>0.001</mu2>
+    <gravity>false</gravity>
   </gazebo>
-  <gazebo reference="rear_right_wheel_link">
+  <gazebo reference="back_right_wheel_link">
     <material>Gazebo/DarkGrey</material>
-    <mu1>1.0</mu1>
-    <mu2>1.0</mu2>
+    <mu1>0.001</mu1>
+    <mu2>0.001</mu2>
+    <gravity>false</gravity>
+  </gazebo>
+
+  <gazebo reference="chassis_link">
+    <material>Gazebo/Grey</material>
+    <mu1>0.001</mu1>
+    <mu2>0.001</mu2>
+    <gravity>false</gravity>
   </gazebo>
 
 </robot>

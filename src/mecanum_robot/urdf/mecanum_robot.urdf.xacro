@@ -92,7 +92,7 @@
         <!-- Cylinder inertia -->
         <inertia
           ixx="0.0001" ixy="0" ixz="0" 
-          iyy="0" iyz="0" izz="0" />
+          iyy="0.0001" iyz="0" izz="0.0001"/>
       </inertial>
     </link>
 
@@ -112,9 +112,7 @@
   <xacro:mecanum_wheel name="back_left"  y_pos="${-wheelbase/2}" x_pos="${-track_width/2}" rotation="0"/>
 
 
-  <!-- ========================== -->
-  <!--     TOF SENSOR MACRO       -->
-  <!-- ========================== -->
+  <!-- ToF Sensor Macro -->
 
   <xacro:macro name="tof_sensor" params="name x_pos y_pos yaw">
     <link name="${name}_tof_link">
@@ -126,14 +124,47 @@
       <child link="${name}_tof_link" />
       <origin xyz="${x_pos} ${y_pos} ${tof_z}" rpy="0 0 ${yaw}" />
     </joint>
+
+    <gazebo reference="${name}_tof_link">
+      <sensor type="ray" name="${name}_tof">
+        <always_on>true</always_on>
+        <update_rate>30</update_rate>
+        <visualize>true</visualize>
+        <ray>
+          <scan>
+            <horizontal>
+              <samples>1</samples>
+              <resolution>1</resolution>
+              <min_angle>0</min_angle>
+              <max_angle>0</max_angle>
+            </horizontal>
+          </scan>
+          <range>
+            <min>0.03</min>
+            <max>2.0</max>
+            <resolution>0.001</resolution>
+          </range>
+        </ray>
+        <plugin name="${name}_tof_plugin" filename="libgazebo_ros_ray_sensor.so">
+          <ros>
+            <remapping>~/out:=${name}_tof/range</remapping>
+          </ros>
+          <output_type>sensor_msgs/Range</output_type>
+          <radiation_type>infrared</radiation_type>
+          <field_of_view>0.44</field_of_view>
+          <frame_name>${name}_tof_link</frame_name>
+        </plugin>
+      </sensor>
+    </gazebo>
   </xacro:macro>
 
   <!-- Instantiate 5 ToF sensors -->
   <!-- yaw: 0 = facing +X (forward), pi/2 = facing +Y (left), pi = facing back, -pi/2 = facing right -->
   <xacro:tof_sensor name="front"       x_pos="${tof_front_x}"      y_pos="${tof_front_y}"   yaw="${pi/2}" />
-  <xacro:tof_sensor name="rear_right"  x_pos="${tof_rear_right_x}" y_pos="${tof_rear_y}"    yaw="${-pi/2}" />
-  <xacro:tof_sensor name="rear_left"   x_pos="${tof_rear_left_x}"  y_pos="${tof_rear_y}"    yaw="${-pi/2}" />
-  <xacro:tof_sensor name="side"        x_pos="${tof_side_x}"       y_pos="${tof_side_y}"    yaw="${pi}" />
+  <xacro:tof_sensor name="right"  x_pos="${-tof_side_x}" y_pos="${tof_side_y}"    yaw="0" />
+  <xacro:tof_sensor name="rear_right"   x_pos="${tof_rear_right_x}"  y_pos="${tof_rear_y}"    yaw="-1.3439" />
+  <xacro:tof_sensor name="rear_left"        x_pos="${tof_rear_left_x}"       y_pos="${tof_rear_y}"    yaw="-1.79769" />
+  <xacro:tof_sensor name="left"  x_pos="${tof_side_x}" y_pos="${tof_side_y}"    yaw="${pi}" />
 
 
   <!-- ========================== -->

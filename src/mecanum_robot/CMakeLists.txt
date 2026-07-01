@@ -27,5 +27,24 @@ endif()
 install(DIRECTORY urdf meshes launch worlds config
   DESTINATION share/${PROJECT_NAME}
 )
+find_package(nav_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+
+add_executable(sparse_slam src/sparse_slam.cpp)
+ament_target_dependencies(sparse_slam
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  nav_msgs
+  tf2_ros
+  tf2
+  tf2_geometry_msgs
+)
+
+install(TARGETS sparse_slam
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 ament_package()

@@ -151,21 +151,26 @@
     </gazebo>
   </xacro:macro>
 
+  <!-- IMU (BNO085) -->
+<link name="imu_link">
+</link>
+
+<joint name="imu_joint" type="fixed">
+  <parent link="base_link" />
+  <child link="imu_link" />
+  <origin xyz="0 0 0.1182" rpy="0 0 0" />
+</joint>
+
   <!-- Instantiate 5 ToF sensors -->
-  <!-- yaw: 0 = facing +X (forward), pi/2 = facing +Y (left), pi = facing back, -pi/2 = facing right -->
+  <!-- yaw: 0 = facing +X (right), pi/2 = facing +Y (forward) -->
   <xacro:tof_sensor name="front"       x_pos="${tof_front_x}"      y_pos="${tof_front_y}"   yaw="${pi/2}" />
   <xacro:tof_sensor name="right"  x_pos="${-tof_side_x}" y_pos="${tof_side_y}"    yaw="0" />
   <xacro:tof_sensor name="rear_right"   x_pos="${tof_rear_right_x}"  y_pos="${tof_rear_y}"    yaw="-1.3439" />
   <xacro:tof_sensor name="rear_left"        x_pos="${tof_rear_left_x}"       y_pos="${tof_rear_y}"    yaw="-1.79769" />
   <xacro:tof_sensor name="left"  x_pos="${tof_side_x}" y_pos="${tof_side_y}"    yaw="${pi}" />
 
-
-  <!-- ========================== -->
-  <!--     GAZEBO PLUGIN          -->
-  <!-- ========================== -->
-  <!-- Planar move plugin for mecanum omnidirectional control -->
-  <!-- Accepts cmd_vel with linear.x, linear.y, and angular.z -->
-
+  <!--     GAZEBO PLUGINS          -->
+ 
   <gazebo>
     <plugin name="mecanum_controller" filename="libgazebo_ros_planar_move.so">
       <ros>
@@ -213,5 +218,35 @@
     <mu2>0.001</mu2>
     <gravity>false</gravity>
   </gazebo>
+
+  <gazebo reference="imu_link">
+  <sensor type="imu" name="bno085_imu">
+    <always_on>true</always_on>
+    <update_rate>100</update_rate>
+    <visualize>false</visualize>
+    <plugin name="imu_plugin" filename="libgazebo_ros_imu_sensor.so">
+      <ros>
+        <remapping>~/out:=imu/data</remapping>
+      </ros>
+      <frame_name>imu_link</frame_name>
+      <initial_orientation_as_reference>false</initial_orientation_as_reference>
+      <!-- BNO085 noise characteristics -->
+      <gaussianNoise>0.01</gaussianNoise>
+    </plugin>
+  </sensor>
+</gazebo>
+
+<gazebo>
+  <plugin name="joint_state_publisher" filename="libgazebo_ros_joint_state_publisher.so">
+    <ros>
+      <remapping>~/out:=joint_states</remapping>
+    </ros>
+    <update_rate>50</update_rate>
+    <joint_name>front_left_wheel_joint</joint_name>
+    <joint_name>front_right_wheel_joint</joint_name>
+    <joint_name>back_left_wheel_joint</joint_name>
+    <joint_name>back_right_wheel_joint</joint_name>
+  </plugin>
+</gazebo>
 
 </robot>

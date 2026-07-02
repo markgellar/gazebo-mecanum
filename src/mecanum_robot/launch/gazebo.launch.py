@@ -20,7 +20,9 @@ def generate_launch_description():
 
         # Start Gazebo
         ExecuteProcess(
-            cmd=['gazebo', '--verbose', '-s', 'libgazebo_ros_factory.so', ],
+            cmd=['gazebo', '--verbose', 
+            '-s', 'libgazebo_ros_init.so',
+            '-s', 'libgazebo_ros_factory.so'],
             output='screen',
         ),
 
@@ -28,7 +30,7 @@ def generate_launch_description():
         Node(
             package='robot_state_publisher',
             executable='robot_state_publisher',
-            parameters=[{'robot_description': robot_description}],
+            parameters=[{'robot_description': robot_description, 'use_sim_time': True}],
         ),
 
         # Spawn the robot in Gazebo
@@ -37,6 +39,15 @@ def generate_launch_description():
             executable='spawn_entity.py',
             arguments=['-topic', 'robot_description', '-entity', 'mecanum_robot'],
             output='screen',
+        ),
+
+        Node(
+            package='robot_localization',
+            executable='ekf_node',
+            name='ekf_filter_node',
+            output='screen',
+            parameters=[os.path.join(pkg_path, 'config', 'ekf.yaml'),
+            {'use_sim_time': True}],
         ),
 
         TimerAction(

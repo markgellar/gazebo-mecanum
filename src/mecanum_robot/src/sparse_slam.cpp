@@ -39,7 +39,7 @@ public:
 
     // Subscribe to odometry
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-      "odom", 10,
+      "odometry/filtered", 10,
       [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
         std::lock_guard<std::mutex> lock(pose_mutex_);
         robot_x_ = msg->pose.pose.position.x;

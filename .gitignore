@@ -4,3 +4,10 @@ log/
 .vscode/
 *.pyc
 __pycache__/
+firmware/build/
+firmware/managed_components/
+firmware/sdkconfig.old
+firmware/components/micro_ros_espidf_component/micro_ros_dev/
+firmware/components/micro_ros_espidf_component/micro_ros_src/
+firmware/components/micro_ros_espidf_component/libmicroros.a
+firmware/components/micro_ros_espidf_component/include/

@@ -79,11 +79,12 @@ private:
   void handle_range(const sensor_msgs::msg::Range::SharedPtr msg,
                     const std::string& frame_id)
   {
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+      "ToF %s: range=%.3f min=%.3f max=%.3f",
+      frame_id.c_str(), msg->range, msg->min_range, msg->max_range);
+
     std::lock_guard<std::mutex> lock(pose_mutex_);
     if (!pose_received_) return;
-
-    // Skip invalid readings
-    if (msg->range < msg->min_range || msg->range > msg->max_range) return;
 
     // Get sensor pose in odom frame via TF
     geometry_msgs::msg::TransformStamped transform;
@@ -99,9 +100,20 @@ private:
     double sensor_y = transform.transform.translation.y;
     double sensor_yaw = tf2::getYaw(transform.transform.rotation);
 
+    // Clamp to max range for free-space tracing
+    double range = msg->range;
+    bool hit_obstacle = true;
+
+    if (range > msg->max_range || std::isinf(range)) {
+      range = msg->max_range;
+      hit_obstacle = false;
+    } else if (range < msg->min_range) {
+        return;  // Too close, invalid
+    }
+
     // Endpoint of the ray
-    double hit_x = sensor_x + msg->range * std::cos(sensor_yaw);
-    double hit_y = sensor_y + msg->range * std::sin(sensor_yaw);
+    double hit_x = sensor_x + range * std::cos(sensor_yaw);
+    double hit_y = sensor_y + range * std::sin(sensor_yaw);
 
     // Convert to grid coordinates
     int sx = world_to_grid_x(sensor_x);
@@ -112,8 +124,12 @@ private:
     // Bresenham: mark free cells along the ray
     bresenham_free(sx, sy, hx, hy);
 
-    // Mark hit cell as occupied (if within max range)
-    if (msg->range < msg->max_range - 0.05) {
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+      "Traced ray: sensor(%d,%d) -> hit(%d,%d), obstacle=%s",
+      sx, sy, hx, hy, hit_obstacle ? "yes" : "no");
+
+    // Mark hit cell as occupied 
+    if (hit_obstacle) {
       mark_cell(hx, hy, l_occ_);
     }
   }

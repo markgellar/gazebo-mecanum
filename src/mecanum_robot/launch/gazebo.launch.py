@@ -65,6 +65,39 @@ def generate_launch_description():
                     ],
                     output='screen',
                 ),
+
+                # SLAM
+                Node(
+                    package='mecanum_robot',
+                    executable='sparse_slam',
+                    output='screen',
+                    parameters=[{'use_sim_time': True}],
+                ),
+
+                # IMU relay
+                Node(
+                    package='mecanum_robot',
+                    executable='imu_relay.py',
+                    name='imu_relay',
+                    output='screen',
+                    parameters=[{'use_sim_time': True}],
+                ),
+
+                # Twist relay
+                Node(
+                    package='mecanum_robot',
+                    executable='twist_relay.py',
+                    name='twist_relay',
+                    output='screen',
+                ),
+
+                # Navigator
+                Node(
+                    package='mecanum_robot',
+                    executable='navigator',
+                    output='screen',
+                    parameters=[{'use_sim_time': True}],
+                ),
             ],
         ),
     ])

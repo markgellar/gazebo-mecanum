@@ -43,7 +43,21 @@ ament_target_dependencies(sparse_slam
   tf2_geometry_msgs
 )
 
-install(TARGETS sparse_slam
+add_executable(navigator src/navigator.cpp)
+ament_target_dependencies(navigator
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  nav_msgs
+  tf2
+  tf2_geometry_msgs
+)
+
+install(TARGETS sparse_slam navigator
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(PROGRAMS scripts/imu_relay.py scripts/twist_relay.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

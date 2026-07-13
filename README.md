@@ -179,4 +179,4 @@ idf.py -p /dev/ttyACM0 flash monitor
 
 ## Author
 
-Built by Mark Williams — University of Pennsylvania, MEAM 5100 Mechatronics.
+Built by Mark William Gellar

@@ -775,9 +775,97 @@ void centralCommand() {
   }
 }
 
-// Madgwick filter
+#define IMU_ADDR 0x6A
+#define MAG_ADDR 0x1C
+
+// Madgwick filter state
 float q0 = 1.0f, q1 = 0.0f, q2 = 0.0f, q3 = 0.0f;
-float beta = 0.1f;
+float beta = 0.04f;
+
+// Latest IMU readings (for micro-ROS publishing)
+float imu_ax, imu_ay, imu_az;
+float imu_gx, imu_gy, imu_gz;
+
+// Gyro bias (auto-calibrated at startup)
+float gyro_bias_x = 0.0f;
+float gyro_bias_y = 0.0f;
+float gyro_bias_z = 0.0f;
+bool gyro_calibrated = false;
+
+// Mag hard-iron offsets (from calibration procedure)
+float mag_offset_x = 66.53f;
+float mag_offset_y = 6.99f;
+float mag_offset_z = -3.19f;
+
+// Set to true to use magnetometer for absolute heading
+bool use_mag = true;
+
+void writeReg(uint8_t addr, uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.write(val);
+  Wire.endTransmission();
+}
+
+void initIMU() {
+  writeReg(IMU_ADDR, 0x10, 0x48);  // Accel: 104Hz, ±4g
+  writeReg(IMU_ADDR, 0x11, 0x40);  // Gyro: 104Hz, ±250dps
+  writeReg(MAG_ADDR, 0x20, 0x1C);  // Mag: 155Hz, high-perf XY
+  writeReg(MAG_ADDR, 0x21, 0x00);  // Mag: ±4 gauss
+  writeReg(MAG_ADDR, 0x22, 0x00);  // Mag: continuous mode
+  writeReg(MAG_ADDR, 0x23, 0x0C);  // Mag: high-perf Z
+  Serial.println("IMU initialized");
+}
+
+void calibrateGyro() {
+  Serial.println("Calibrating gyro - hold still...");
+  float sum_x = 0, sum_y = 0, sum_z = 0;
+  int samples = 500;
+
+  for (int i = 0; i < samples; i++) {
+    Wire.beginTransmission(IMU_ADDR);
+    Wire.write(0x22);
+    Wire.endTransmission();
+    uint8_t received = Wire.requestFrom(IMU_ADDR, 6);
+    if (received < 6) { i--; continue; }
+
+    int16_t gx_raw = Wire.read() | (Wire.read() << 8);
+    int16_t gy_raw = Wire.read() | (Wire.read() << 8);
+    int16_t gz_raw = Wire.read() | (Wire.read() << 8);
+
+    sum_x += gx_raw * 0.000153f;
+    sum_y += gy_raw * 0.000153f;
+    sum_z += gz_raw * 0.000153f;
+
+    delay(2);
+  }
+
+  gyro_bias_x = sum_x / samples;
+  gyro_bias_y = sum_y / samples;
+  gyro_bias_z = sum_z / samples;
+  gyro_calibrated = true;
+
+  Serial.printf("Gyro bias: %.5f %.5f %.5f\n",
+                gyro_bias_x, gyro_bias_y, gyro_bias_z);
+}
+
+void readMag(float &mx, float &my, float &mz) {
+  Wire.beginTransmission(MAG_ADDR);
+  Wire.write(0x28);
+  Wire.endTransmission();
+
+  uint8_t received = Wire.requestFrom(MAG_ADDR, 6);
+  if (received < 6) { mx = my = mz = 0; return; }
+
+  int16_t mx_raw = Wire.read() | (Wire.read() << 8);
+  int16_t my_raw = Wire.read() | (Wire.read() << 8);
+  int16_t mz_raw = Wire.read() | (Wire.read() << 8);
+
+  // ±4 gauss: 6842 LSB/gauss, convert to microtesla
+  mx = mx_raw * 0.0146f;
+  my = my_raw * 0.0146f;
+  mz = mz_raw * 0.0146f;
+}
 
 void madgwickUpdate6DOF(float gx, float gy, float gz,
                         float ax, float ay, float az,
@@ -786,8 +874,6 @@ void madgwickUpdate6DOF(float gx, float gy, float gz,
   float recipNorm;
   float s0, s1, s2, s3;
   float qDot1, qDot2, qDot3, qDot4;
-  float _2q0, _2q1, _2q2, _2q3, _4q0, _4q1, _4q2;
-  float _8q1, _8q2, q0q0, q1q1, q2q2, q3q3;
 
   qDot1 = 0.5f * (-q1 * gx - q2 * gy - q3 * gz);
   qDot2 = 0.5f * ( q0 * gx + q2 * gz - q3 * gy);
@@ -801,13 +887,13 @@ void madgwickUpdate6DOF(float gx, float gy, float gz,
     ay *= recipNorm;
     az *= recipNorm;
 
-    _2q0 = 2.0f * q0; _2q1 = 2.0f * q1;
-    _2q2 = 2.0f * q2; _2q3 = 2.0f * q3;
-    _4q0 = 4.0f * q0; _4q1 = 4.0f * q1;
-    _4q2 = 4.0f * q2;
-    _8q1 = 8.0f * q1; _8q2 = 8.0f * q2;
-    q0q0 = q0 * q0; q1q1 = q1 * q1;
-    q2q2 = q2 * q2; q3q3 = q3 * q3;
+    float _2q0 = 2.0f * q0, _2q1 = 2.0f * q1;
+    float _2q2 = 2.0f * q2, _2q3 = 2.0f * q3;
+    float _4q0 = 4.0f * q0, _4q1 = 4.0f * q1;
+    float _4q2 = 4.0f * q2;
+    float _8q1 = 8.0f * q1, _8q2 = 8.0f * q2;
+    float q0q0 = q0 * q0, q1q1 = q1 * q1;
+    float q2q2 = q2 * q2, q3q3 = q3 * q3;
 
     s0 = _4q0 * q2q2 + _2q2 * ax + _4q0 * q1q1 - _2q1 * ay;
     s1 = _4q1 * q3q3 - _2q3 * ax + 4.0f * q0q0 * q1 - _2q0 * ay - _4q1 + _8q1 * q1q1 + _8q1 * q2q2 + _4q1 * az;
@@ -836,40 +922,77 @@ void madgwickUpdate6DOF(float gx, float gy, float gz,
   q3 *= recipNorm;
 }
 
-// Store latest raw IMU data for micro-ROS publishing
-float imu_ax, imu_ay, imu_az;
-float imu_gx, imu_gy, imu_gz;
+void madgwickUpdate9DOF(float gx, float gy, float gz,
+                        float ax, float ay, float az,
+                        float mx, float my, float mz,
+                        float dt)
+{
+  float recipNorm;
+  float s0, s1, s2, s3;
+  float qDot1, qDot2, qDot3, qDot4;
+  float hx, hy;
+  float _2q0mx, _2q0my, _2q0mz, _2q1mx, _2bx, _2bz;
+  float _4bx, _4bz, _2q0, _2q1, _2q2, _2q3;
+  float q0q0, q0q1, q0q2, q0q3, q1q1, q1q2, q1q3, q2q2, q2q3, q3q3;
 
-void writeReg(uint8_t addr, uint8_t reg, uint8_t val) {
-  Wire.beginTransmission(addr);
-  Wire.write(reg);
-  Wire.write(val);
-  Wire.endTransmission();
-}
+  qDot1 = 0.5f * (-q1 * gx - q2 * gy - q3 * gz);
+  qDot2 = 0.5f * ( q0 * gx + q2 * gz - q3 * gy);
+  qDot3 = 0.5f * ( q0 * gy - q1 * gz + q3 * gx);
+  qDot4 = 0.5f * ( q0 * gz + q1 * gy - q2 * gx);
 
-void initIMU() {
-  // LSM6DS3TRC: 104Hz accel, ±4g
-  writeReg(IMU_ADDR, 0x10, 0x48);
-  // LSM6DS3TRC: 104Hz gyro, ±250dps
-  writeReg(IMU_ADDR, 0x11, 0x40);
-  // LIS3MDL: 155Hz, high performance XY
-  writeReg(MAG_ADDR, 0x20, 0x1C);
-  // LIS3MDL: ±4 gauss
-  writeReg(MAG_ADDR, 0x21, 0x00);
-  // LIS3MDL: continuous mode
-  writeReg(MAG_ADDR, 0x22, 0x00);
-  // LIS3MDL: high performance Z
-  writeReg(MAG_ADDR, 0x23, 0x0C);
+  float aNorm = ax * ax + ay * ay + az * az;
+  if (aNorm < 0.01f) goto integrate;
+  recipNorm = 1.0f / sqrtf(aNorm);
+  ax *= recipNorm; ay *= recipNorm; az *= recipNorm;
 
-  Serial.println("IMU initialized (direct registers)");
+  float mNorm;
+  mNorm = mx * mx + my * my + mz * mz;
+  if (mNorm < 0.01f) goto integrate;
+  recipNorm = 1.0f / sqrtf(mNorm);
+  mx *= recipNorm; my *= recipNorm; mz *= recipNorm;
+
+  _2q0mx = 2.0f * q0 * mx; _2q0my = 2.0f * q0 * my; _2q0mz = 2.0f * q0 * mz;
+  _2q1mx = 2.0f * q1 * mx;
+  _2q0 = 2.0f * q0; _2q1 = 2.0f * q1; _2q2 = 2.0f * q2; _2q3 = 2.0f * q3;
+  q0q0 = q0 * q0; q0q1 = q0 * q1; q0q2 = q0 * q2; q0q3 = q0 * q3;
+  q1q1 = q1 * q1; q1q2 = q1 * q2; q1q3 = q1 * q3;
+  q2q2 = q2 * q2; q2q3 = q2 * q3; q3q3 = q3 * q3;
+
+  hx = mx * q0q0 - _2q0my * q3 + _2q0mz * q2 + mx * q1q1 + _2q1 * my * q2 + _2q1 * mz * q3 - mx * q2q2 - mx * q3q3;
+  hy = _2q0mx * q3 + my * q0q0 - _2q0mz * q1 + _2q1mx * q2 - my * q1q1 + my * q2q2 + _2q2 * mz * q3 - my * q3q3;
+  _2bx = sqrtf(hx * hx + hy * hy);
+  _2bz = -_2q0mx * q2 + _2q0my * q1 + mz * q0q0 + _2q1mx * q3 - mz * q1q1 + _2q2 * my * q3 - mz * q2q2 + mz * q3q3;
+  _4bx = 2.0f * _2bx; _4bz = 2.0f * _2bz;
+
+  s0 = -_2q2 * (2.0f * q1q3 - _2q0 * q2 - ax) + _2q1 * (2.0f * q0q1 + _2q2 * q3 - ay) - _2bz * q2 * (_2bx * (0.5f - q2q2 - q3q3) + _2bz * (q1q3 - q0q2) - mx) + (-_2bx * q3 + _2bz * q1) * (_2bx * (q1q2 - q0q3) + _2bz * (q0q1 + q2q3) - my) + _2bx * q2 * (_2bx * (q0q2 + q1q3) + _2bz * (0.5f - q1q1 - q2q2) - mz);
+  s1 = _2q3 * (2.0f * q1q3 - _2q0 * q2 - ax) + _2q0 * (2.0f * q0q1 + _2q2 * q3 - ay) - 4.0f * q1 * (1 - 2.0f * q1q1 - 2.0f * q2q2 - az) + _2bz * q3 * (_2bx * (0.5f - q2q2 - q3q3) + _2bz * (q1q3 - q0q2) - mx) + (_2bx * q2 + _2bz * q0) * (_2bx * (q1q2 - q0q3) + _2bz * (q0q1 + q2q3) - my) + (_2bx * q3 - _4bz * q1) * (_2bx * (q0q2 + q1q3) + _2bz * (0.5f - q1q1 - q2q2) - mz);
+  s2 = -_2q0 * (2.0f * q1q3 - _2q0 * q2 - ax) + _2q3 * (2.0f * q0q1 + _2q2 * q3 - ay) - 4.0f * q2 * (1 - 2.0f * q1q1 - 2.0f * q2q2 - az) + (-_4bx * q2 - _2bz * q0) * (_2bx * (0.5f - q2q2 - q3q3) + _2bz * (q1q3 - q0q2) - mx) + (_2bx * q1 + _2bz * q3) * (_2bx * (q1q2 - q0q3) + _2bz * (q0q1 + q2q3) - my) + (_2bx * q0 - _4bz * q2) * (_2bx * (q0q2 + q1q3) + _2bz * (0.5f - q1q1 - q2q2) - mz);
+  s3 = _2q1 * (2.0f * q1q3 - _2q0 * q2 - ax) + _2q2 * (2.0f * q0q1 + _2q2 * q3 - ay) + (-_4bx * q3 + _2bz * q1) * (_2bx * (0.5f - q2q2 - q3q3) + _2bz * (q1q3 - q0q2) - mx) + (-_2bx * q0 + _2bz * q2) * (_2bx * (q1q2 - q0q3) + _2bz * (q0q1 + q2q3) - my) + _2bx * q1 * (_2bx * (q0q2 + q1q3) + _2bz * (0.5f - q1q1 - q2q2) - mz);
+
+  recipNorm = 1.0f / sqrtf(s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3);
+  s0 *= recipNorm; s1 *= recipNorm; s2 *= recipNorm; s3 *= recipNorm;
+
+  qDot1 -= beta * s0; qDot2 -= beta * s1;
+  qDot3 -= beta * s2; qDot4 -= beta * s3;
+
+integrate:
+  q0 += qDot1 * dt; q1 += qDot2 * dt;
+  q2 += qDot3 * dt; q3 += qDot4 * dt;
+
+  recipNorm = 1.0f / sqrtf(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
+  q0 *= recipNorm; q1 *= recipNorm;
+  q2 *= recipNorm; q3 *= recipNorm;
 }
 
 void readIMU() {
+  if (!gyro_calibrated) return;
+
   // Read accel (0x28-0x2D)
   Wire.beginTransmission(IMU_ADDR);
   Wire.write(0x28);
   Wire.endTransmission();
-  Wire.requestFrom(IMU_ADDR, 6);
+  uint8_t received = Wire.requestFrom(IMU_ADDR, 6);
+  if (received < 6) return;
   int16_t ax_raw = Wire.read() | (Wire.read() << 8);
   int16_t ay_raw = Wire.read() | (Wire.read() << 8);
   int16_t az_raw = Wire.read() | (Wire.read() << 8);
@@ -878,49 +1001,78 @@ void readIMU() {
   Wire.beginTransmission(IMU_ADDR);
   Wire.write(0x22);
   Wire.endTransmission();
-  Wire.requestFrom(IMU_ADDR, 6);
+  received = Wire.requestFrom(IMU_ADDR, 6);
+  if (received < 6) return;
   int16_t gx_raw = Wire.read() | (Wire.read() << 8);
   int16_t gy_raw = Wire.read() | (Wire.read() << 8);
   int16_t gz_raw = Wire.read() | (Wire.read() << 8);
 
-  // Convert to physical units
-  // ±4g: 0.122 mg/LSB = 0.001197 m/s²/LSB
   imu_ax = ax_raw * 0.001197f;
   imu_ay = ay_raw * 0.001197f;
   imu_az = az_raw * 0.001197f;
+  imu_gx = gx_raw * 0.000153f - gyro_bias_x;
+  imu_gy = gy_raw * 0.000153f - gyro_bias_y;
+  imu_gz = gz_raw * 0.000153f - gyro_bias_z;
 
-  // ±250dps: 8.75 mdps/LSB = 0.000153 rad/s/LSB
-  imu_gx = gx_raw * 0.000153f;
-  imu_gy = gy_raw * 0.000153f;
-  imu_gz = gz_raw * 0.000153f;
+  // High beta for first 3 seconds to converge heading, then lower for stability
+  static int imuCount = 0;
+  imuCount++;
 
-  madgwickUpdate6DOF(imu_gx, imu_gy, imu_gz,
-                     imu_ax, imu_ay, imu_az,
-                     0.01f);
+  if (imuCount < 500) {
+    beta = 0.5f;            // first 5 seconds: converge fast
+  } else if (imuCount < 1000) {
+    // ramp from 0.5 to 0.1 over next 5 seconds
+    beta = 0.5f - (imuCount - 500) * 0.0008f;
+  } else {
+    beta = 0.1f;
+  }
+
+  if (use_mag) {
+    float mx, my, mz;
+    readMag(mx, my, mz);
+    mx -= mag_offset_x;
+    my -= mag_offset_y;
+    mz -= mag_offset_z;
+
+    float mx_corrected = my;
+    float my_corrected = mx;
+    float mz_corrected = mz;
+
+    madgwickUpdate9DOF(imu_gx, imu_gy, imu_gz,
+                       imu_ax, imu_ay, imu_az,
+                       mx_corrected, my_corrected, mz_corrected,
+                       0.01f);
+  } else {
+    madgwickUpdate6DOF(imu_gx, imu_gy, imu_gz,
+                       imu_ax, imu_ay, imu_az,
+                       0.01f);
+  }
 
   static int printCount = 0;
   if (++printCount >= 50) {
-    Serial.printf("Quat: w=%.3f x=%.3f y=%.3f z=%.3f  Accel: %.2f %.2f %.2f\n",
-                  q0, q1, q2, q3, imu_ax, imu_ay, imu_az);
+    Serial.printf("Quat: w=%.3f x=%.3f y=%.3f z=%.3f  Heading: %.1f deg\n",
+                  q0, q1, q2, q3,
+                  atan2(2.0f * (q0 * q3 + q1 * q2),
+                        1.0f - 2.0f * (q2 * q2 + q3 * q3)) * 180.0f / PI);
     printCount = 0;
   }
 }
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("1 - Serial OK");
+  Serial.println("Starting...");
 
   if (!Wire.begin(0, 1, 100000)) {
     Serial.println("Wire.begin FAILED");
     while(1) delay(100);
   }
-  Serial.println("2 - Wire OK");
 
   initIMU();
+  calibrateGyro();
 
   memset(occupancy_grid, 0, GRID_BYTES);
   memset(inflated_grid, 0, GRID_BYTES);
-  Serial.println("5 - Setup complete");
+  Serial.println("Setup complete");
 }
 
 int delayTimesMS[] = {     10,     };

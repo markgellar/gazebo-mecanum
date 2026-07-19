@@ -14,5 +14,9 @@ idf_component_register(
   REQUIRES arduino micro_ros_espidf_component
 )
 
+set_source_files_properties(main_controller.cpp PROPERTIES COMPILE_FLAGS "-Wno-error")
+
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-error=unused-result)
+
 set_source_files_properties(${VL53L0X_SRC} PROPERTIES COMPILE_FLAGS "-Wno-error=maybe-uninitialized -Wno-error")
 set_source_files_properties(${BUSIO_SRC} PROPERTIES COMPILE_FLAGS "-Wno-error")

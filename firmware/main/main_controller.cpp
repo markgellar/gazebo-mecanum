@@ -1084,7 +1084,7 @@ void readIMU() {
 #include <rclc/executor.h>
 #include <sensor_msgs/msg/range.h>
 #include <sensor_msgs/msg/imu.h>
-// #include <nav_msgs/msg/odometry.h>
+#include <nav_msgs/msg/odometry.h>
 #include <WiFi.h>
 // #include <std_msgs/msg/float32_multi_array.h>
 
@@ -1100,12 +1100,12 @@ rclc_executor_t executor;
 
 rcl_publisher_t imu_pub;
 rcl_publisher_t tof_pub;
-// rcl_publisher_t odom_pub;
+rcl_publisher_t odom_pub;
 
 sensor_msgs__msg__Imu imu_msg;
 sensor_msgs__msg__Range tof_msg;
 int tof_cycle = 0;
-// nav_msgs__msg__Odometry odom_msg;
+nav_msgs__msg__Odometry odom_msg;
 
 bool microros_connected = false;
 
@@ -1231,8 +1231,10 @@ void initMicroROS() {
 
   Serial.println("Creating node...");
   // ret = rclc_node_init_default(&node, "mecanum_robot", "", &support);
+  node = rcl_get_zero_initialized_node();
   rcl_node_options_t node_options = rcl_node_get_default_options();
   node_options.enable_rosout = false;
+  node_options.use_global_arguments = false;
   ret = rcl_node_init(&node, "mecanum_robot", "", &support.context, &node_options);
   if (ret != RCL_RET_OK) { Serial.printf("Node init failed: %ld\n", ret); return; }
 
@@ -1247,9 +1249,9 @@ void initMicroROS() {
     ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range), "tof/range");
   Serial.printf("ToF pub: %ld\n", ret2);
 
-  // ret2 = rclc_publisher_init_default(&odom_pub, &node,
-  //   ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry), "odom");
-  // Serial.printf("Odom pub: %ld\n", ret2);
+  ret2 = rclc_publisher_init_default(&odom_pub, &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry), "odom");
+  Serial.printf("Odom pub: %ld\n", ret2);
 
   initMessages();
   microros_connected = true;
@@ -1278,13 +1280,13 @@ void initMessages() {
   tof_msg.min_range = 0.03f;
   tof_msg.max_range = 2.0f;
 
-  // // Odom message
-  // odom_msg.header.frame_id.data = (char*)"odom";
-  // odom_msg.header.frame_id.size = 4;
-  // odom_msg.header.frame_id.capacity = 5;
-  // odom_msg.child_frame_id.data = (char*)"base_link";
-  // odom_msg.child_frame_id.size = 9;
-  // odom_msg.child_frame_id.capacity = 10;
+  // Odom message
+  odom_msg.header.frame_id.data = (char*)"odom";
+  odom_msg.header.frame_id.size = 4;
+  odom_msg.header.frame_id.capacity = 5;
+  odom_msg.child_frame_id.data = (char*)"base_link";
+  odom_msg.child_frame_id.size = 9;
+  odom_msg.child_frame_id.capacity = 10;
 }
 
 void publishToROS() {
@@ -1328,25 +1330,25 @@ void publishToROS() {
   rc = rcl_publish(&tof_pub, &tof_msg, NULL);
   tof_cycle = (tof_cycle + 1) % 5;
 
-  // // Publish odometry
-  // odom_msg.header.stamp.sec = sec;
-  // odom_msg.header.stamp.nanosec = nsec;
-  // odom_msg.pose.pose.position.x = finalCoords[0];
-  // odom_msg.pose.pose.position.y = finalCoords[1];
-  // odom_msg.pose.pose.position.z = 0;
-  // // Heading to quaternion
-  // float half_yaw = finalCoords[2] / 2.0f;
-  // odom_msg.pose.pose.orientation.w = cos(half_yaw);
-  // odom_msg.pose.pose.orientation.x = 0;
-  // odom_msg.pose.pose.orientation.y = 0;
-  // odom_msg.pose.pose.orientation.z = sin(half_yaw);
-  // // Pose covariance
-  // odom_msg.pose.covariance[0] = 0.01;   // x
-  // odom_msg.pose.covariance[7] = 0.01;   // y
-  // odom_msg.pose.covariance[35] = 0.03;  // yaw
+  // Publish odometry
+  odom_msg.header.stamp.sec = sec;
+  odom_msg.header.stamp.nanosec = nsec;
+  odom_msg.pose.pose.position.x = finalCoords[0];
+  odom_msg.pose.pose.position.y = finalCoords[1];
+  odom_msg.pose.pose.position.z = 0;
+  // Heading to quaternion
+  float half_yaw = finalCoords[2] / 2.0f;
+  odom_msg.pose.pose.orientation.w = cos(half_yaw);
+  odom_msg.pose.pose.orientation.x = 0;
+  odom_msg.pose.pose.orientation.y = 0;
+  odom_msg.pose.pose.orientation.z = sin(half_yaw);
+  // Pose covariance
+  odom_msg.pose.covariance[0] = 0.01;   // x
+  odom_msg.pose.covariance[7] = 0.01;   // y
+  odom_msg.pose.covariance[35] = 0.03;  // yaw
   
-  // Serial.println("PUB5");
-  // rc = rcl_publish(&odom_pub, &odom_msg, NULL);
+  Serial.println("PUB5");
+  rc = rcl_publish(&odom_pub, &odom_msg, NULL);
 }
 
 void setup() {

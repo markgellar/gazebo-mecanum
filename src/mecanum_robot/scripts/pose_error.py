@@ -5,7 +5,9 @@ Ground truth is /odom (exact, sim only). The estimate is base_link in
 `estimate_frame`, read from TF: 'odom' is the EKF's dead-reckoning, 'map' will
 be the SLAM-corrected pose. Observe-only: nothing here affects the robot.
 """
+import json
 import math
+import os
 from collections import deque
 
 import rclpy
@@ -14,7 +16,7 @@ from rclpy.time import Time
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Float64
+from std_msgs.msg import Bool, Float64
 from tf2_ros import Buffer, TransformListener, TransformException
 
 
@@ -41,6 +43,10 @@ class PoseError(Node):
         self.base_frame = self.declare_parameter('base_frame', 'base_link').value
         # Evaluate truth samples this old, so TF for that exact moment has arrived
         self.delay = Duration(seconds=self.declare_parameter('delay', 0.2).value)
+        # Spin-end truth for tools/slam_replay.py, next to sparse_slam's recorded spins. Empty = off.
+        self.record_dir = self.declare_parameter('record_dir', '').value
+        if self.record_dir:
+            os.makedirs(self.record_dir, exist_ok=True)
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -55,10 +61,14 @@ class PoseError(Node):
         self.sum_err = 0.0
         self.sum_sq_err = 0.0
         self.max_err = 0.0
+        self.last_signed = None  # (x, y, heading deg) of the latest estimate - truth
+        self.last_poses = None   # (truth, estimate) as (x, y, yaw), each from its own start
 
         self.sub = self.create_subscription(Odometry, 'odom', self.callback, 50)
         self.pos_pub = self.create_publisher(Float64, 'pose_error/position', 10)
         self.hdg_pub = self.create_publisher(Float64, 'pose_error/heading', 10)
+        # At the end of each spin, log the signed error so it can be compared with the scan matcher
+        self.spin_sub = self.create_subscription(Bool, 'spin_scan', self.on_spin_scan, 10)
 
     def callback(self, msg):
         stamp = Time.from_msg(msg.header.stamp)
@@ -95,6 +105,8 @@ class PoseError(Node):
         pos_err = math.hypot(er[0] - tr[0], er[1] - tr[1])
         hdg_err = math.degrees(wrap(er[2] - tr[2]))
 
+        self.last_signed = (er[0] - tr[0], er[1] - tr[1], hdg_err)
+        self.last_poses = (tr, er)
         self.count += 1
         self.sum_err += pos_err
         self.sum_sq_err += pos_err * pos_err
@@ -108,6 +120,19 @@ class PoseError(Node):
             'Error %.3f m (max %.3f), heading %+.1f deg, traveled %.2f m, %.1f%% of distance'
             % (pos_err, self.max_err, hdg_err, self.distance, pct),
             throttle_duration_sec=5.0)
+
+    def on_spin_scan(self, msg):
+        if msg.data or self.last_signed is None:
+            return
+        x, y, h = self.last_signed
+        self.get_logger().info(
+            'At spin end: error x=%+.3f y=%+.3f heading=%+.2f deg -> ideal correction (%+.3f, %+.3f, %+.2f deg)'
+            % (x, y, h, -x, -y, -h))
+        if self.record_dir and self.last_poses:
+            tr, er = self.last_poses
+            with open(os.path.join(self.record_dir, 'truth.jsonl'), 'a') as f:
+                f.write(json.dumps({'sim_time': self.get_clock().now().nanoseconds * 1e-9,
+                                    'truth': list(tr), 'estimate': list(er)}) + '\n')
 
     def summary(self):
         if self.count == 0:

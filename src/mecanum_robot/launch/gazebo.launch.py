@@ -1,4 +1,5 @@
 import os
+import time
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import ExecuteProcess, SetEnvironmentVariable, TimerAction
@@ -9,6 +10,8 @@ def generate_launch_description():
     pkg_path = get_package_share_directory('mecanum_robot')
     urdf_file = os.path.join(pkg_path, 'urdf', 'mecanum_robot.urdf.xacro')
     world_file = os.path.join(pkg_path, 'worlds', 'obstacles.world')
+    # One folder per run for spin recordings + truth (analyze with tools/slam_replay.py)
+    record_dir = os.path.expanduser(time.strftime('~/mecanum_ws/slam_records/%Y-%m-%d_%H-%M-%S'))
 
     robot_description = xacro.process_file(urdf_file).toxml()
 
@@ -64,7 +67,7 @@ def generate_launch_description():
                     package='mecanum_robot',
                     executable='sparse_slam',
                     output='screen',
-                    parameters=[{'use_sim_time': True}],
+                    parameters=[{'use_sim_time': True, 'record_dir': record_dir}],
                 ),
 
                 # IMU relay
@@ -85,13 +88,13 @@ def generate_launch_description():
                     parameters=[{'use_sim_time': True}],
                 ),
 
-                # Pose error vs ground truth (observe only). Switch estimate_frame to 'map' once SLAM corrects pose.
+                # Pose error vs ground truth (observe only). 'map' = SLAM-corrected pose, 'odom' = EKF alone.
                 Node(
                     package='mecanum_robot',
                     executable='pose_error.py',
                     name='pose_error',
                     output='screen',
-                    parameters=[{'use_sim_time': True, 'estimate_frame': 'odom'}],
+                    parameters=[{'use_sim_time': True, 'estimate_frame': 'map', 'record_dir': record_dir}],
                 ),
 
                 # Twist relay

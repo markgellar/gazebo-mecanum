@@ -35,6 +35,7 @@ find_package(tf2 REQUIRED)
 add_executable(sparse_slam src/sparse_slam.cpp)
 ament_target_dependencies(sparse_slam
   rclcpp
+  std_msgs
   sensor_msgs
   geometry_msgs
   nav_msgs
@@ -46,9 +47,11 @@ ament_target_dependencies(sparse_slam
 add_executable(navigator src/navigator.cpp)
 ament_target_dependencies(navigator
   rclcpp
+  std_msgs
   sensor_msgs
   geometry_msgs
   nav_msgs
+  tf2_ros
   tf2
   tf2_geometry_msgs
 )

@@ -1,8 +1,10 @@
 #include <rclcpp/rclcpp.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
-#include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/range.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <std_msgs/msg/bool.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 #include <tf2/utils.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
@@ -49,15 +51,9 @@ public:
     heading_tolerance_ = this->declare_parameter("heading_tolerance", 0.15);
     inflation_radius_ = this->declare_parameter("inflation_radius", 3);  // cells; 3 × 5 cm ≈ robot half-width + margin
 
-    odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-      "odometry/filtered", 10,
-      [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        robot_x_ = msg->pose.pose.position.x;
-        robot_y_ = msg->pose.pose.position.y;
-        robot_yaw_ = tf2::getYaw(msg->pose.pose.orientation);
-        pose_received_ = true;
-      });
+    // Pose comes from TF map→base_link, so it includes SLAM's map→odom correction
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
     map_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
       "map", 10,
@@ -84,6 +80,7 @@ public:
     }
 
     cmd_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
+    spin_scan_pub_ = this->create_publisher<std_msgs::msg::Bool>("spin_scan", 10);
 
     timer_ = this->create_wall_timer(
       std::chrono::milliseconds(50),
@@ -93,10 +90,26 @@ public:
   }
 
 private:
+  // Robot pose in the map frame: SLAM's map→odom correction + the EKF's odom→base_link
+  bool update_pose()
+  {
+    try {
+      auto tf = tf_buffer_->lookupTransform("map", "base_link", tf2::TimePointZero);
+      robot_x_ = tf.transform.translation.x;
+      robot_y_ = tf.transform.translation.y;
+      robot_yaw_ = tf2::getYaw(tf.transform.rotation);
+      return true;
+    } catch (const tf2::TransformException& ex) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+        "Waiting for map -> base_link: %s", ex.what());
+      return false;
+    }
+  }
+
   void control_loop()
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!pose_received_ || !map_received_) return;
+    if (!map_received_ || !update_pose()) return;
 
     switch (state_) {
       case State::INITIAL_SPIN: execute_spin(); break;
@@ -118,6 +131,11 @@ private:
       RCLCPP_INFO(this->get_logger(), "Starting %s at yaw %.2f",
                   state_ == State::INITIAL_SPIN ? "initial scan" : "refine scan",
                   robot_yaw_);
+
+      // Tell SLAM to start collecting this spin as one scan
+      std_msgs::msg::Bool msg;
+      msg.data = true;
+      spin_scan_pub_->publish(msg);
     }
 
     double delta = robot_yaw_ - last_spin_yaw_;
@@ -137,6 +155,12 @@ private:
       last_x_ = robot_x_;
       last_y_ = robot_y_;
 
+      // SLAM inserts the scan when it gets this; find_frontier waits for that map
+      std_msgs::msg::Bool msg;
+      msg.data = false;
+      spin_scan_pub_->publish(msg);
+      spin_end_time_ = this->now();
+
       RCLCPP_INFO(this->get_logger(), "Scan complete (%.1f deg). Finding frontier...",
                   std::abs(spin_accumulated_) * 180.0 / M_PI);
       state_ = State::FIND_FRONTIER;
@@ -145,6 +169,13 @@ private:
 
   void find_frontier()
   {
+      // Wait for a map that includes the last spin scan (SLAM stamps map_load_time when it inserts one)
+      if (rclcpp::Time(map_.info.map_load_time, RCL_ROS_TIME) < spin_end_time_) {
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                             "Waiting for map with the latest scan...");
+        return;
+      }
+
       std::vector<Frontier> frontiers = detect_frontiers();
 
       if (frontiers.empty()) {
@@ -630,7 +661,6 @@ private:
   double last_x_ = 0.0, last_y_ = 0.0;
 
   double robot_x_ = 0.0, robot_y_ = 0.0, robot_yaw_ = 0.0;
-  bool pose_received_ = false;
 
   nav_msgs::msg::OccupancyGrid map_;
   bool map_received_ = false;
@@ -639,6 +669,7 @@ private:
   size_t path_index_ = 0;
   size_t frontier_skip_count_ = 0;
   double target_x_ = 0.0, target_y_ = 0.0;
+  rclcpp::Time spin_end_time_{0, 0, RCL_ROS_TIME};
 
   double min_obstacle_range_ = 999.0;
   int drive_cycles_ = 0;
@@ -655,10 +686,12 @@ private:
   int inflation_radius_;
 
   std::mutex mutex_;
-  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Range>::SharedPtr> range_subs_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr spin_scan_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

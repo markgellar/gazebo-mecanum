@@ -12,8 +12,9 @@ ekf_filter_node:
     two_d_mode: true          # We're doing 2D navigation, ignore roll/pitch
 
     # ── Odometry (from planar move plugin) ──
-    odom0: /odom
-    odom0_config: [true,  true,  false,   # x, y, z
+    odom0: /odom_noisy        # drifting copy from odom_noise.py; ground truth stays on /odom
+    # Velocities only: the EKF integrates them with its own (IMU) heading, so heading drift becomes position drift
+    odom0_config: [false, false, false,   # x, y, z
                    false, false, false,    # roll, pitch, yaw
                    true,  true,  false,    # vx, vy, vz
                    false, false, true,     # vroll, vpitch, vyaw

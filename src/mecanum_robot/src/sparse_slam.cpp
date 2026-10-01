@@ -79,20 +79,22 @@ private:
   void handle_range(const sensor_msgs::msg::Range::SharedPtr msg,
                     const std::string& frame_id)
   {
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
       "ToF %s: range=%.3f min=%.3f max=%.3f",
       frame_id.c_str(), msg->range, msg->min_range, msg->max_range);
 
     std::lock_guard<std::mutex> lock(pose_mutex_);
     if (!pose_received_) return;
 
-    // Get sensor pose in odom frame via TF
+    // Get sensor pose in odom frame via TF, at the moment the reading was taken
     geometry_msgs::msg::TransformStamped transform;
     try {
       transform = tf_buffer_->lookupTransform("odom", frame_id,
-                                               tf2::TimePointZero,
+                                               msg->header.stamp,
                                                tf2::durationFromSec(0.1));
     } catch (const tf2::TransformException& ex) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+        "Dropping %s reading, no TF: %s", frame_id.c_str(), ex.what());
       return;
     }
 
@@ -104,7 +106,7 @@ private:
     double range = msg->range;
     bool hit_obstacle = true;
 
-    if (range > msg->max_range || std::isinf(range)) {
+    if (range >= msg->max_range || std::isinf(range)) {
       range = msg->max_range;
       hit_obstacle = false;
     } else if (range < msg->min_range) {
@@ -124,7 +126,7 @@ private:
     // Bresenham: mark free cells along the ray
     bresenham_free(sx, sy, hx, hy);
 
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
       "Traced ray: sensor(%d,%d) -> hit(%d,%d), obstacle=%s",
       sx, sy, hx, hy, hit_obstacle ? "yes" : "no");
 

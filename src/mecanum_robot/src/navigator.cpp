@@ -355,6 +355,18 @@ private:
     //   }
     // }
 
+    // The robot is physically at the start, so clear inflation (not real obstacles) around it.
+    // Otherwise stopping near a wall boxes the start in and every frontier looks unreachable.
+    for (int dy = -inflation_radius_; dy <= inflation_radius_; dy++) {
+      for (int dx = -inflation_radius_; dx <= inflation_radius_; dx++) {
+        int nx = sx + dx;
+        int ny = sy + dy;
+        if (nx >= 0 && nx < w && ny >= 0 && ny < h && map_.data[ny * w + nx] <= 65) {
+          blocked[ny * w + nx] = false;
+        }
+      }
+    }
+
     blocked[sy * w + sx] = false;
     blocked[gy * w + gx] = false;
 

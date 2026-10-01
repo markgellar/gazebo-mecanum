@@ -34,14 +34,6 @@ def generate_launch_description():
             parameters=[{'robot_description': robot_description, 'use_sim_time': True}],
         ),
 
-        # Spawn the robot in Gazebo
-        Node(
-            package='gazebo_ros',
-            executable='spawn_entity.py',
-            arguments=['-topic', 'robot_description', '-entity', 'mecanum_robot'],
-            output='screen',
-        ),
-
         Node(
             package='robot_localization',
             executable='ekf_node',
@@ -82,6 +74,24 @@ def generate_launch_description():
                     name='imu_relay',
                     output='screen',
                     parameters=[{'use_sim_time': True}],
+                ),
+
+                # Odometry noise: realistic drift between Gazebo's perfect /odom and the EKF
+                Node(
+                    package='mecanum_robot',
+                    executable='odom_noise.py',
+                    name='odom_noise',
+                    output='screen',
+                    parameters=[{'use_sim_time': True}],
+                ),
+
+                # Pose error vs ground truth (observe only). Switch estimate_frame to 'map' once SLAM corrects pose.
+                Node(
+                    package='mecanum_robot',
+                    executable='pose_error.py',
+                    name='pose_error',
+                    output='screen',
+                    parameters=[{'use_sim_time': True, 'estimate_frame': 'odom'}],
                 ),
 
                 # Twist relay

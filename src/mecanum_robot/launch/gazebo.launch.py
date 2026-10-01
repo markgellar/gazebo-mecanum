@@ -8,6 +8,7 @@ import xacro
 def generate_launch_description():
     pkg_path = get_package_share_directory('mecanum_robot')
     urdf_file = os.path.join(pkg_path, 'urdf', 'mecanum_robot.urdf.xacro')
+    world_file = os.path.join(pkg_path, 'worlds', 'obstacles.world')
 
     robot_description = xacro.process_file(urdf_file).toxml()
 
@@ -20,7 +21,7 @@ def generate_launch_description():
 
         # Start Gazebo
         ExecuteProcess(
-            cmd=['gazebo', '--verbose', 
+            cmd=['gazebo', '--verbose', world_file,
             '-s', 'libgazebo_ros_init.so',
             '-s', 'libgazebo_ros_factory.so'],
             output='screen',

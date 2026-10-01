@@ -42,10 +42,12 @@ public:
     spin_speed_ = this->declare_parameter("spin_speed", 0.5);
     drive_speed_ = this->declare_parameter("drive_speed", 0.15);
     refine_distance_ = this->declare_parameter("refine_distance", 1.5);
-    obstacle_threshold_ = this->declare_parameter("obstacle_threshold", 0.15);
+    refine_radius_ = this->declare_parameter("refine_radius", 1.5);        // m; area a refine spin would reveal
+    refine_min_frontier_ = this->declare_parameter("refine_min_frontier", 20);  // cells; 20 × 5 cm = 1 m of frontier
+    obstacle_threshold_ = this->declare_parameter("obstacle_threshold", 0.10);
     waypoint_tolerance_ = this->declare_parameter("waypoint_tolerance", 0.08);
     heading_tolerance_ = this->declare_parameter("heading_tolerance", 0.15);
-    inflation_radius_ = this->declare_parameter("inflation_radius", 3);
+    inflation_radius_ = this->declare_parameter("inflation_radius", 3);  // cells; 3 × 5 cm ≈ robot half-width + margin
 
     odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
       "odometry/filtered", 10,
@@ -143,42 +145,103 @@ private:
 
   void find_frontier()
   {
-    std::vector<Frontier> frontiers = detect_frontiers();
+      std::vector<Frontier> frontiers = detect_frontiers();
 
-    if (frontiers.empty()) {
-      RCLCPP_INFO(this->get_logger(), "No frontiers found. Exploration complete!");
-      state_ = State::DONE;
-      return;
-    }
+      if (frontiers.empty()) {
+        RCLCPP_INFO(this->get_logger(), "No frontiers found. Exploration complete!");
+        state_ = State::DONE;
+        return;
+      }
 
-    double best_dist = 1e9;
-    bool found_target = false;
-
-    for (auto& frontier : frontiers) {
-      for (auto& [gx, gy] : frontier.cells) {
-        double wx = map_.info.origin.position.x + (gx + 0.5) * map_.info.resolution;
-        double wy = map_.info.origin.position.y + (gy + 0.5) * map_.info.resolution;
-        double dx = wx - robot_x_;
-        double dy = wy - robot_y_;
-        double dist = std::sqrt(dx * dx + dy * dy);
-        if (dist > 0.3 && dist < best_dist) {
-          best_dist = dist;
-          target_x_ = wx;
-          target_y_ = wy;
-          found_target = true;
+      // Collect all frontier cells sorted by distance
+      std::vector<std::pair<double, std::pair<double, double>>> candidates;
+      for (auto& frontier : frontiers) {
+        for (auto& [gx, gy] : frontier.cells) {
+          double wx = map_.info.origin.position.x + (gx + 0.5) * map_.info.resolution;
+          double wy = map_.info.origin.position.y + (gy + 0.5) * map_.info.resolution;
+          double dx = wx - robot_x_;
+          double dy = wy - robot_y_;
+          double dist = std::sqrt(dx * dx + dy * dy);
+          if (dist > 0.3) {
+            candidates.push_back({dist, {wx, wy}});
+          }
         }
       }
-    }
 
-    if (!found_target) {
-      RCLCPP_INFO(this->get_logger(), "No reachable frontier cells. Exploration complete!");
-      state_ = State::DONE;
-      return;
-    }
+      std::sort(candidates.begin(), candidates.end());
 
-    RCLCPP_INFO(this->get_logger(), "Target frontier cell at (%.2f, %.2f), dist=%.2f",
-                target_x_, target_y_, best_dist);
-    state_ = State::PLAN_PATH;
+      // Find a candidate far enough from previously failed targets
+      bool found_target = false;
+      RCLCPP_INFO(this->get_logger(), "Candidates: %zu, skip_count: %zu", candidates.size(), frontier_skip_count_);
+      while (frontier_skip_count_ < candidates.size()) {
+        double cx = candidates[frontier_skip_count_].second.first;
+        double cy = candidates[frontier_skip_count_].second.second;
+
+        if (frontier_skip_count_ == 0) {
+          target_x_ = cx;
+          target_y_ = cy;
+          found_target = true;
+          break;
+        }
+
+        // Skip cells within 0.5m of the last failed target
+        double dx = cx - target_x_;
+        double dy = cy - target_y_;
+        if (std::sqrt(dx * dx + dy * dy) > 0.5) {
+          target_x_ = cx;
+          target_y_ = cy;
+          found_target = true;
+          break;
+        }
+        frontier_skip_count_++;
+      }
+
+      if (!found_target) {
+        RCLCPP_INFO(this->get_logger(), "All frontiers unreachable. Exploration complete!");
+        frontier_skip_count_ = 0;
+        state_ = State::DONE;
+        return;
+      }
+
+      RCLCPP_INFO(this->get_logger(), "Target frontier at (%.2f, %.2f), dist=%.2f (skip %zu)",
+                  target_x_, target_y_, candidates[frontier_skip_count_].first, frontier_skip_count_);
+      state_ = State::PLAN_PATH;
+  }
+
+  // Free-ish cell with at least one unknown 8-neighbor. Caller keeps (x, y) off the map border.
+  bool is_frontier_cell(int x, int y) const
+  {
+    int w = map_.info.width;
+    int idx = y * w + x;
+    if (map_.data[idx] < 0 || map_.data[idx] > 40) return false;
+
+    for (int dy = -1; dy <= 1; dy++) {
+      for (int dx = -1; dx <= 1; dx++) {
+        if (dx == 0 && dy == 0) continue;
+        if (map_.data[(y + dy) * w + (x + dx)] == -1) return true;
+      }
+    }
+    return false;
+  }
+
+  // Number of frontier cells within `radius` meters of the robot
+  int count_nearby_frontier_cells(double radius) const
+  {
+    int w = map_.info.width;
+    int h = map_.info.height;
+    double res = map_.info.resolution;
+    int rx = static_cast<int>((robot_x_ - map_.info.origin.position.x) / res);
+    int ry = static_cast<int>((robot_y_ - map_.info.origin.position.y) / res);
+    int r = static_cast<int>(radius / res);
+
+    int count = 0;
+    for (int y = std::max(1, ry - r); y <= std::min(h - 2, ry + r); y++) {
+      for (int x = std::max(1, rx - r); x <= std::min(w - 2, rx + r); x++) {
+        if ((x - rx) * (x - rx) + (y - ry) * (y - ry) > r * r) continue;
+        if (is_frontier_cell(x, y)) count++;
+      }
+    }
+    return count;
   }
 
   std::vector<Frontier> detect_frontiers()
@@ -193,24 +256,8 @@ private:
 
     for (int y = 1; y < h - 1; y++) {
       for (int x = 1; x < w - 1; x++) {
-        int idx = y * w + x;
-        if (map_.data[idx] < 0 || map_.data[idx] > 40) continue;
-
-        bool has_unknown_neighbor = false;
-        for (int dy = -1; dy <= 1; dy++) {
-          for (int dx = -1; dx <= 1; dx++) {
-            if (dx == 0 && dy == 0) continue;
-            int ni = (y + dy) * w + (x + dx);
-            if (map_.data[ni] == -1) {
-              has_unknown_neighbor = true;
-              break;
-            }
-          }
-          if (has_unknown_neighbor) break;
-        }
-
-        if (has_unknown_neighbor) {
-          frontier_indices.insert(idx);
+        if (is_frontier_cell(x, y)) {
+          frontier_indices.insert(y * w + x);
         }
       }
     }
@@ -299,17 +346,20 @@ private:
       }
     }
 
-    for (int y = 0; y < h; y++) {
-      for (int x = 0; x < w; x++) {
-        int idx = y * w + x;
-        if (map_.data[idx] < 0) {
-          blocked[idx] = true;
-        }
-      }
-    }
+    // for (int y = 0; y < h; y++) {
+    //   for (int x = 0; x < w; x++) {
+    //     int idx = y * w + x;
+    //     if (map_.data[idx] < 0) {
+    //       blocked[idx] = true;
+    //     }
+    //   }
+    // }
 
     blocked[sy * w + sx] = false;
     blocked[gy * w + gx] = false;
+
+    RCLCPP_INFO(this->get_logger(), "A* from (%d,%d) to (%d,%d), blocked_start=%d blocked_goal=%d",
+                sx, sy, gx, gy, blocked[sy * w + sx] ? 1 : 0, blocked[gy * w + gx] ? 1 : 0);
 
     std::priority_queue<Cell, std::vector<Cell>, std::greater<Cell>> open;
     std::vector<double> g_cost(w * h, 1e9);
@@ -328,7 +378,16 @@ private:
     int dy8[] = {-1, -1, -1, 0, 0, 1, 1, 1};
     double cost8[] = {1.414, 1.0, 1.414, 1.0, 1.0, 1.414, 1.0, 1.414};
 
+    int iterations = 0;
+    int max_iterations = 50000;
     while (!open.empty()) {
+      if (++iterations > max_iterations) {
+        RCLCPP_WARN(this->get_logger(), "A* exceeded max iterations", max_iterations);
+        frontier_skip_count_++;
+        state_ = State::FIND_FRONTIER;
+        return;
+      }
+
       Cell current = open.top();
       open.pop();
 
@@ -350,6 +409,7 @@ private:
         if (closed[nidx] || blocked[nidx]) continue;
 
         double new_g = g_cost[cidx] + cost8[i];
+
         if (new_g < g_cost[nidx]) {
           g_cost[nidx] = new_g;
           parent[nidx] = cidx;
@@ -359,10 +419,14 @@ private:
     }
 
     if (!found) {
-      RCLCPP_WARN(this->get_logger(), "No path found to frontier.");
+      RCLCPP_WARN(this->get_logger(), "No path found to frontier. Trying next...");
+      frontier_skip_count_++;
       state_ = State::FIND_FRONTIER;
       return;
     }
+
+    // Reset skip count on success
+    frontier_skip_count_ = 0;
 
     // Extract path
     path_.clear();
@@ -406,7 +470,7 @@ private:
           }
           int e2 = 2 * err;
           if (e2 > -ddy) { err -= ddy; cx += step_x; }
-          if (e2 < ddx) { err += ddy; cy += step_y; }
+          if (e2 < ddx) { err += ddx; cy += step_y; }
         }
 
         if (clear) furthest = j;
@@ -417,6 +481,11 @@ private:
     path_ = smooth_path;
     path_index_ = 0;
 
+    // Fresh start for the drive: drop readings collected while spinning/planning
+    min_obstacle_range_ = 999.0;
+    drive_cycles_ = 0;
+    backup_count_ = 0;
+
     RCLCPP_INFO(this->get_logger(), "Path planned: %zu waypoints", path_.size());
     state_ = State::DRIVE;
   }
@@ -426,22 +495,52 @@ private:
     double current_min_range = min_obstacle_range_;
     min_obstacle_range_ = 999.0;
 
-    if (current_min_range < obstacle_threshold_) {
-      RCLCPP_WARN(this->get_logger(), "Obstacle detected at %.2fm! Stopping to rescan.",
+    // Backing up: keep reversing until the countdown ends, then rescan and replan
+    if (backup_count_ > 0) {
+      if (--backup_count_ == 0) {
+        stop_robot();
+        spin_started_ = false;
+        state_ = State::SPIN_SCAN;
+        return;
+      }
+      geometry_msgs::msg::Twist cmd;
+      cmd.linear.y = -0.10;
+      cmd_pub_->publish(cmd);
+      return;
+    }
+
+    // Skip obstacle check for first 10 drive cycles to let robot start moving
+    drive_cycles_++;
+
+    if (drive_cycles_ > 10 && current_min_range < obstacle_threshold_) {
+      RCLCPP_WARN(this->get_logger(), "Obstacle detected at %.2fm! Backing up...",
                   current_min_range);
-      stop_robot();
-      spin_started_ = false;
-      state_ = State::SPIN_SCAN;
+      geometry_msgs::msg::Twist cmd;
+      cmd.linear.y = -0.10;
+      cmd_pub_->publish(cmd);
+      backup_count_ = 20;  // 1 s at 20 Hz ≈ 10 cm
       return;
     }
 
     if (accumulated_distance_ > refine_distance_) {
-      RCLCPP_INFO(this->get_logger(), "Accumulated %.2fm — stopping to refine.",
-                  accumulated_distance_);
-      stop_robot();
-      spin_started_ = false;
-      state_ = State::SPIN_SCAN;
-      return;
+      // Only stop to scan if it would reveal something, and the arrival scan isn't close anyway
+      double to_target = std::hypot(target_x_ - robot_x_, target_y_ - robot_y_);
+      int nearby = count_nearby_frontier_cells(refine_radius_);
+
+      if (to_target > refine_distance_ && nearby >= refine_min_frontier_) {
+        RCLCPP_INFO(this->get_logger(),
+                    "Accumulated %.2fm, %d frontier cells nearby — stopping to refine.",
+                    accumulated_distance_, nearby);
+        stop_robot();
+        spin_started_ = false;
+        state_ = State::SPIN_SCAN;
+        return;
+      }
+
+      RCLCPP_INFO(this->get_logger(),
+                  "Accumulated %.2fm, %d frontier cells nearby, %.2fm to target — skipping refine.",
+                  accumulated_distance_, nearby, to_target);
+      accumulated_distance_ = 0.0;
     }
 
     if (path_index_ >= path_.size()) {
@@ -526,13 +625,18 @@ private:
 
   std::vector<std::pair<double, double>> path_;
   size_t path_index_ = 0;
+  size_t frontier_skip_count_ = 0;
   double target_x_ = 0.0, target_y_ = 0.0;
 
   double min_obstacle_range_ = 999.0;
+  int drive_cycles_ = 0;
+  int backup_count_ = 0;
 
   double spin_speed_;
   double drive_speed_;
   double refine_distance_;
+  double refine_radius_;
+  int refine_min_frontier_;
   double obstacle_threshold_;
   double waypoint_tolerance_;
   double heading_tolerance_;

@@ -32,11 +32,20 @@ import rcd_check as C    # noqa: E402
 ASSOC_ANGLE = math.radians(4.0)    # direction difference
 ASSOC_LINE = 0.25                  # m, distance from the stored wall's line
 ASSOC_REACH = 0.8                  # m, from the nearest point already seen on that wall
+# Several sensors in one spin often see the SAME feature (e.g. one box corner): that is one piece of
+# evidence, not several. Sightings this close in position and direction are grouped into one feature.
+FEATURE_RADIUS = 0.3               # m
+FEATURE_ANGLE = math.radians(4.0)
 # Heading correction is a 1-D Kalman filter: how sure we are of the heading vs how sure the walls are
-MIN_AGREE = 3                      # sightings needed for a measurement
+MIN_WALLS = 1                      # distinct known walls needed for a wall measurement
+MIN_AGREE = 2                      # distinct features needed for a Manhattan measurement
+# One distinct feature's direction error: faces are good to ~0.7 deg but corners and oblique views
+# mixed in are off by several degrees, so one feature alone is a weak measurement
+FEATURE_SIGMA = math.radians(2.0)
+REJECT_INFLATE = math.radians(2.0) # after a rejected measurement, admit more uncertainty (no lock-out)
 DRIFT_PER_SPIN = math.radians(1.2) # heading uncertainty added each spin (EKF drifts ~1.1 deg/spin)
 SIGHTING_SIGMA = math.radians(1.0) # one RCD's bearing noise
-WALLS_FLOOR = math.radians(0.5)    # best case for a wall-map measurement
+WALLS_FLOOR = math.radians(0.75)   # best case for a wall-map measurement
 MANHATTAN_FLOOR = math.radians(1.5)  # Manhattan: off-axis walls (rotated boxes) can bias it
 GATE_SIGMAS = 3.0                  # reject measurements further than this from the expected heading
 
@@ -86,6 +95,20 @@ class Corrector:
             out.append((b, sensor + rng * np.array([math.cos(b), math.sin(b)])))
         return out
 
+    @staticmethod
+    def features(seen):
+        """Group sightings of the same thing: (mean bearing, mean point, count)."""
+        groups = []
+        for b, p in seen:
+            for g in groups:
+                gb = math.atan2(g['s'], g['c'])
+                if abs(wrap(gb - b)) < FEATURE_ANGLE and np.hypot(*(g['p'] / g['n'] - p)) < FEATURE_RADIUS:
+                    g['c'] += math.cos(b); g['s'] += math.sin(b); g['p'] = g['p'] + p; g['n'] += 1
+                    break
+            else:
+                groups.append({'c': math.cos(b), 's': math.sin(b), 'p': np.array(p, float), 'n': 1})
+        return [(math.atan2(g['s'], g['c']), g['p'] / g['n'], g['n']) for g in groups]
+
     def associate(self, bearing, point):
         best = None
         for w in self.walls:
@@ -103,46 +126,54 @@ class Corrector:
         self.pose[2] = wrap(self.pose[2] + dyaw)
 
     def step(self, rcds, pivot_odom):
-        """One spin. Returns (correction applied, source, n associated, reason)."""
+        """One spin. Returns (correction applied, source, n distinct walls/features, reason)."""
         self.var += DRIFT_PER_SPIN ** 2
-        seen = self.sightings(rcds)
-        diffs = [wrap(w.bearing - b) for b, p in seen if (w := self.associate(b, p)) is not None]
+        feats = self.features(self.sightings(rcds))
 
-        # Measurement z of the heading correction, with variance r
+        # Wall measurement: one direction difference per distinct known wall
+        per_wall = {}
+        for b, p, _ in feats:
+            w = self.associate(b, p)
+            if w is not None:
+                per_wall.setdefault(id(w), []).append(wrap(w.bearing - b))
+        diffs = [float(np.median(v)) for v in per_wall.values()]
+
         z = None
-        if len(diffs) >= MIN_AGREE:
+        if len(diffs) >= MIN_WALLS:
             source = 'walls'
             d = np.array(diffs)
             z = float(np.median(d))
-            spread = max(float(np.median(np.abs(d - z))), SIGHTING_SIGMA)
+            spread = max(float(np.median(np.abs(d - z))), FEATURE_SIGMA)
             r = spread ** 2 / len(d) + WALLS_FLOOR ** 2
+            support = len(d)
         else:
             source = 'manhattan'
-            est, inliers, spread_deg = C.manhattan_heading([b for b, _ in seen])
+            est, inliers, spread_deg = C.manhattan_heading([b for b, _, _ in feats])
+            support = inliers
             if est is not None and inliers >= MIN_AGREE:
                 z = -est
-                spread = max(math.radians(spread_deg), SIGHTING_SIGMA)
+                spread = max(math.radians(spread_deg), FEATURE_SIGMA)
                 r = spread ** 2 / inliers + MANHATTAN_FLOOR ** 2
         if z is None:
-            reason = '%d known walls, too few for Manhattan' % len(diffs)
             self.add_walls(rcds)
-            return None, source, len(diffs), reason
+            return None, source, len(diffs), '%d known walls, %d features: too few' % (len(diffs), len(feats))
 
         sigma = math.sqrt(self.var + r)
         if abs(z) > GATE_SIGMAS * sigma:
+            self.var += REJECT_INFLATE ** 2   # if we are wrong about being right, let evidence back in
             self.add_walls(rcds)
-            return None, source, len(diffs), '%+.1f° outside 3σ=%.1f°' % (math.degrees(z), math.degrees(3 * sigma))
+            return None, source, support, '%+.1f° outside 3σ=%.1f°' % (math.degrees(z), math.degrees(3 * sigma))
 
         gain = self.var / (self.var + r)
         delta = gain * z
         self.var *= (1 - gain)
         self.rotate_about(self.to_map(pivot_odom), delta)
         self.add_walls(rcds)
-        return delta, source, len(diffs), ''
+        return delta, source, support, ''
 
     def add_walls(self, rcds):
-        """Map this spin's (corrected) sightings: refine known walls, add new ones."""
-        for b, p in self.sightings(rcds):
+        """Map this spin's (corrected) features: refine known walls, add new ones."""
+        for b, p, _ in self.features(self.sightings(rcds)):
             w = self.associate(b, p)
             if w:
                 w.add(b, p)

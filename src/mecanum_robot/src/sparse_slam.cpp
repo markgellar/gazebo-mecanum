@@ -15,6 +15,9 @@
 #include <string>
 #include <mutex>
 #include <filesystem>
+#include <limits>
+#include <map>
+#include <algorithm>
 #include <fstream>
 
 // One ToF reading as a ray, in the odom frame
@@ -27,6 +30,22 @@ struct Ray {
   double half_fov;   // cone half-angle, rad
   int sensor = -1;   // index into the sensor list (front, rear_right, rear_left, left, right)
   double stamp = 0;  // reading time, s
+};
+
+// A Region of Constant Depth (Leonard & Durrant-Whyte): while a cone sweeps across a flat wall its
+// reading stays constant for about one cone width, and the middle of that run points along the wall's
+// normal, far more precisely than the cone itself. Odom frame.
+struct Rcd {
+  double bearing;   // sensor -> wall, rad
+  double range;     // m
+  double sx, sy;    // sensor position at the middle of the run
+};
+
+// A wall face in the map frame: the direction it is seen from, and the surface points seen on it
+struct Wall {
+  double sum_c = 0.0, sum_s = 0.0;
+  std::vector<std::pair<double, double>> points;
+  double bearing() const { return std::atan2(sum_s, sum_c); }
 };
 
 // Outcome of matching one spin scan against the map
@@ -99,6 +118,13 @@ public:
     match_free_weight_ = declare_parameter("match_free_weight", 1.0);     // penalty for walls inside a reading's cone
     match_free_margin_ = declare_parameter("match_free_margin", 0.2);     // m; only look this far short of the reading
     default_half_fov_ = declare_parameter("default_fov", 0.44) / 2.0;     // used if a Range msg has no field_of_view
+
+    // Heading correction from wall directions (RCDs), a 1-D Kalman filter on the map->odom heading
+    wall_heading_apply_ = declare_parameter("wall_heading_apply", true);
+    wall_heading_drift_ = declare_parameter("wall_heading_drift_deg", 1.2) * M_PI / 180.0;  // uncertainty added per spin
+    // Direction of the walls (mod 90 deg) in the map frame for the Manhattan fallback. NaN = learn it from
+    // the first spin with clear walls (real robot: unknown start angle to the room).
+    manhattan_axes_ = declare_parameter("manhattan_axes_deg", std::numeric_limits<double>::quiet_NaN()) * M_PI / 180.0;
     match_min_fraction_ = declare_parameter("match_min_fraction", 0.4);   // share of hits that must land on walls
     match_min_gain_ = declare_parameter("match_min_gain", 0.02);          // score improvement over no correction
 
@@ -253,6 +279,8 @@ private:
       RCLCPP_INFO(get_logger(), "Scan match skipped: %s", m.reason.c_str());
     }
 
+    if (wall_heading_apply_) correct_heading(scan_buffer_);
+
     size_t hits = 0;
     for (const auto& ray : scan_buffer_) {
       insert_ray(ray);
@@ -392,6 +420,245 @@ private:
          << ", \"window_rot\": " << m.window_rot << ", \"window_trans\": " << m.window_trans
          << ", \"reject\": \"" << (m.reason.empty() ? m.reject : m.reason) << "\"}\n"
          << "}\n";
+  }
+
+  static double wrap(double a) { return std::atan2(std::sin(a), std::cos(a)); }
+
+  // RCDs in one spin: per sensor, in time order, find each plateau of readings within kRcdTolerance of a
+  // stretch's minimum range that is about one cone wide. The slopes either side (the wall still visible
+  // at the cone's edge, slightly further away) are excluded by the tight tolerance.
+  std::vector<Rcd> find_rcds(const std::vector<Ray>& scan) const
+  {
+    std::map<int, std::vector<const Ray*>> by_sensor;
+    for (const auto& r : scan) by_sensor[r.sensor].push_back(&r);
+
+    std::vector<Rcd> out;
+    for (auto& [id, seq] : by_sensor) {
+      std::sort(seq.begin(), seq.end(), [](const Ray* a, const Ray* b) { return a->stamp < b->stamp; });
+      size_t n = seq.size();
+      std::vector<double> h(n), rng(n);
+      for (size_t i = 0; i < n; i++) {
+        double a = std::atan2(seq[i]->ey - seq[i]->sy, seq[i]->ex - seq[i]->sx);
+        h[i] = i == 0 ? a : h[i - 1] + wrap(a - h[i - 1]);   // unwrapped heading
+        rng[i] = std::hypot(seq[i]->ex - seq[i]->sx, seq[i]->ey - seq[i]->sy);
+      }
+      size_t i = 0;
+      while (i < n) {
+        if (!seq[i]->hit) {
+          i++;
+          continue;
+        }
+        size_t j = i;   // one continuous stretch of hits
+        while (j + 1 < n && seq[j + 1]->hit && std::abs(h[j + 1] - h[j]) < 0.1 && std::abs(rng[j + 1] - rng[j]) < 0.05) j++;
+        size_t k = i;
+        for (size_t t = i; t <= j; t++) if (rng[t] < rng[k]) k = t;
+        size_t a = k, b = k;
+        while (a > i && rng[a - 1] <= rng[k] + kRcdTolerance) a--;
+        while (b < j && rng[b + 1] <= rng[k] + kRcdTolerance) b++;
+        double width = std::abs(h[b] - h[a]);
+        double cone = 2.0 * seq[k]->half_fov;
+        if (width >= cone - kRcdWidthSlack && width <= cone + kRcdWidthSlack) {
+          const Ray* mid = seq[(a + b) / 2];
+          out.push_back({(h[a] + h[b]) / 2.0, rng[k], mid->sx, mid->sy});
+        }
+        i = j + 1;
+      }
+    }
+    return out;
+  }
+
+  // Dominant wall direction modulo 90 deg, relative to `axes`: robust circular mean of 4*angle
+  static bool manhattan(const std::vector<double>& bearings, double axes, double& est, int& inliers, double& spread)
+  {
+    auto fold = [](double a) { return std::remainder(a, M_PI / 2.0); };   // into [-45, 45] deg
+    if (bearings.empty()) return false;
+    std::vector<double> b;
+    for (double x : bearings) b.push_back(fold(x - axes));
+    auto mean4 = [&](double centre, bool inliers_only) {
+      double c = 0.0, s = 0.0;
+      for (double x : b) {
+        double r = fold(x - centre);
+        if (inliers_only && std::abs(r) >= kManhattanInlier) continue;
+        c += std::cos(4.0 * r);
+        s += std::sin(4.0 * r);
+      }
+      return fold(centre + std::atan2(s, c) / 4.0);
+    };
+    est = mean4(0.0, false);
+    for (int it = 0; it < 3; it++) est = mean4(est, true);
+    std::vector<double> resid;
+    for (double x : b) {
+      double r = std::abs(fold(x - est));
+      if (r < kManhattanInlier) resid.push_back(r);
+    }
+    inliers = static_cast<int>(resid.size());
+    if (resid.empty()) return false;
+    std::nth_element(resid.begin(), resid.begin() + resid.size() / 2, resid.end());
+    spread = resid[resid.size() / 2];
+    return true;
+  }
+
+  // Rotate map->odom about a map-frame point (the robot): heading changes, the robot stays put
+  void rotate_map_odom_about(double px, double py, double dyaw)
+  {
+    double c = std::cos(dyaw), s = std::sin(dyaw);
+    double ox = map_odom_x_ - px, oy = map_odom_y_ - py;
+    map_odom_x_ = px + c * ox - s * oy;
+    map_odom_y_ = py + s * ox + c * oy;
+    map_odom_yaw_ = wrap(map_odom_yaw_ + dyaw);
+    publish_map_to_odom();
+  }
+
+  // Heading correction from wall directions, once per spin. Sightings of walls already in the map
+  // measure the heading drift since those walls were stored; with none in view, Manhattan (walls at
+  // 90 deg to each other) is the fallback. A 1-D Kalman filter weighs each measurement against how
+  // uncertain the heading has become, and rejects anything outside 3 sigma.
+  void correct_heading(const std::vector<Ray>& scan)
+  {
+    std::vector<Rcd> rcds = find_rcds(scan);
+    heading_var_ += wall_heading_drift_ * wall_heading_drift_;
+
+    struct Sighting { double bearing, x, y; };
+    auto sightings = [&]() {
+      std::vector<Sighting> out;
+      for (const auto& r : rcds) {
+        double sx, sy;
+        odom_to_map(r.sx, r.sy, sx, sy);
+        double b = r.bearing + map_odom_yaw_;
+        out.push_back({b, sx + r.range * std::cos(b), sy + r.range * std::sin(b)});
+      }
+      return out;
+    };
+    auto associate = [&](const Sighting& s) -> Wall* {
+      Wall* best = nullptr;
+      double best_ang = kAssocAngle;
+      for (auto& w : walls_) {
+        double d_ang = std::abs(wrap(w.bearing() - s.bearing));
+        if (d_ang >= best_ang) continue;
+        double nx = std::cos(w.bearing()), ny = std::sin(w.bearing());
+        double line = std::abs((s.x - w.points[0].first) * nx + (s.y - w.points[0].second) * ny);
+        if (line >= kAssocLine) continue;
+        double reach = 1e9;
+        for (const auto& [px, py] : w.points) reach = std::min(reach, std::hypot(s.x - px, s.y - py));
+        if (reach >= kAssocReach) continue;
+        best = &w;
+        best_ang = d_ang;
+      }
+      return best;
+    };
+
+    // Group sightings of the same thing into features
+    auto features = [&]() {
+      struct Group { double c, s, x, y; int n; };
+      std::vector<Group> groups;
+      for (const auto& s : sightings()) {
+        bool added = false;
+        for (auto& g : groups) {
+          if (std::abs(wrap(std::atan2(g.s, g.c) - s.bearing)) < kFeatureAngle &&
+              std::hypot(g.x / g.n - s.x, g.y / g.n - s.y) < kFeatureRadius) {
+            g.c += std::cos(s.bearing); g.s += std::sin(s.bearing); g.x += s.x; g.y += s.y; g.n++;
+            added = true;
+            break;
+          }
+        }
+        if (!added) groups.push_back({std::cos(s.bearing), std::sin(s.bearing), s.x, s.y, 1});
+      }
+      std::vector<Sighting> out;
+      for (const auto& g : groups) out.push_back({std::atan2(g.s, g.c), g.x / g.n, g.y / g.n});
+      return out;
+    };
+
+    auto add_walls = [&]() {
+      for (const auto& s : features()) {
+        Wall* w = associate(s);
+        if (!w) {
+          walls_.emplace_back();
+          w = &walls_.back();
+        }
+        w->sum_c += std::cos(s.bearing);
+        w->sum_s += std::sin(s.bearing);
+        if (w->points.size() < kMaxWallPoints) w->points.push_back({s.x, s.y});
+      }
+    };
+
+    // Measurement z of the heading correction, with variance r: one direction difference per known wall
+    std::vector<Sighting> seen = features();
+    std::map<const Wall*, std::vector<double>> per_wall;
+    for (const auto& s : seen) {
+      if (Wall* w = associate(s)) per_wall[w].push_back(wrap(w->bearing() - s.bearing));
+    }
+    auto median = [](std::vector<double> v) {
+      std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+      return v[v.size() / 2];
+    };
+    std::vector<double> diffs;
+    for (auto& [w, d] : per_wall) diffs.push_back(median(d));
+    std::string source, note;
+    double z = 0.0, r = 0.0;
+    int support = 0;
+    bool have = false;
+    if (static_cast<int>(diffs.size()) >= kMinWalls) {
+      source = "walls";
+      z = median(diffs);
+      std::vector<double> dev;
+      for (double x : diffs) dev.push_back(std::abs(x - z));
+      double spread = std::max(median(dev), kFeatureSigma);
+      r = spread * spread / diffs.size() + kWallsFloor * kWallsFloor;
+      support = static_cast<int>(diffs.size());
+      have = true;
+    } else {
+      source = "manhattan";
+      std::vector<double> bearings;
+      for (const auto& s : seen) bearings.push_back(s.bearing);
+      double est, spread;
+      int inliers;
+      bool ok = manhattan(bearings, std::isnan(manhattan_axes_) ? 0.0 : manhattan_axes_, est, inliers, spread);
+      if (!ok || inliers < kMinAgree) {
+        note = std::to_string(seen.size()) + " features, too few for Manhattan";
+      } else if (std::isnan(manhattan_axes_)) {
+        if (spread <= kFeatureSigma / 2.0) {   // learn the room's axes from the first spin with clear walls
+          manhattan_axes_ = est;
+          note = "learned wall axes at " + std::to_string(est * 180.0 / M_PI) + " deg";
+        } else {
+          note = "walls not clear enough to learn axes";
+        }
+      } else {
+        z = -est;
+        spread = std::max(spread, kFeatureSigma);
+        r = spread * spread / inliers + kManhattanFloor * kManhattanFloor;
+        support = inliers;
+        have = true;
+      }
+    }
+
+    double sigma = std::sqrt(heading_var_ + r);
+    if (have && std::abs(z) > kGateSigmas * sigma) {
+      note = source + " measurement " + std::to_string(z * 180.0 / M_PI) + " deg outside 3 sigma";
+      have = false;
+      heading_var_ += kRejectInflate * kRejectInflate;   // if we're wrong about being right, let evidence back in
+    }
+    if (have) {
+      double gain = heading_var_ / (heading_var_ + r);
+      double delta = gain * z;
+      heading_var_ *= (1.0 - gain);
+      double px = 0.0, py = 0.0;   // pivot: the robot, i.e. the mean sensor position
+      for (const auto& ray : scan) {
+        double mx, my;
+        odom_to_map(ray.sx, ray.sy, mx, my);
+        px += mx;
+        py += my;
+      }
+      rotate_map_odom_about(px / scan.size(), py / scan.size(), delta);
+      RCLCPP_INFO(get_logger(),
+        "Wall heading: corrected %+.2f deg (%s: %+.2f deg from %d sightings, gain %.2f) | "
+        "sigma %.2f deg, %zu RCDs, %zu walls",
+        delta * 180.0 / M_PI, source.c_str(), z * 180.0 / M_PI, support, gain,
+        std::sqrt(heading_var_) * 180.0 / M_PI, rcds.size(), walls_.size());
+    } else {
+      RCLCPP_INFO(get_logger(), "Wall heading: no correction (%s) | sigma %.2f deg, %zu RCDs, %zu walls",
+        note.c_str(), std::sqrt(heading_var_) * 180.0 / M_PI, rcds.size(), walls_.size());
+    }
+    add_walls();
   }
 
   // Fold a match into map→odom. The match moves map points by p' = P + R(dyaw)(p - P) + t
@@ -753,6 +1020,33 @@ private:
   bool match_apply_;
   double match_widen_rot_, match_widen_trans_, match_widen_max_rot_, match_widen_max_trans_;
   int spins_since_correction_ = 0;
+
+  // Wall heading correction
+  bool wall_heading_apply_;
+  double wall_heading_drift_;
+  double manhattan_axes_;                         // rad, NaN until learned
+  double heading_var_ = std::pow(0.5 * M_PI / 180.0, 2);   // the start heading is known
+  std::vector<Wall> walls_;
+  static constexpr double kRcdTolerance = 0.005;             // m, plateau: within this of the run's minimum
+  static constexpr double kRcdWidthSlack = 6.0 * M_PI / 180.0;   // plateau width vs cone width
+  static constexpr double kAssocAngle = 4.0 * M_PI / 180.0;  // sighting vs stored wall: direction...
+  static constexpr double kAssocLine = 0.25;                 // ...distance from its line...
+  static constexpr double kAssocReach = 0.8;                 // ...and from points already seen on it
+  // Several sensors in one spin often see the SAME feature (e.g. one box corner): that is one piece of
+  // evidence, not several. Sightings this close in position and direction form one feature.
+  static constexpr double kFeatureRadius = 0.3;                  // m
+  static constexpr double kFeatureAngle = 4.0 * M_PI / 180.0;
+  // One feature's direction error: faces are good to ~0.7 deg, but corners and oblique views mixed in
+  // are off by several degrees, so a single feature is a weak measurement
+  static constexpr double kFeatureSigma = 2.0 * M_PI / 180.0;
+  static constexpr int kMinWalls = 1;                        // distinct known walls for a wall measurement
+  static constexpr int kMinAgree = 2;                        // distinct features for a Manhattan measurement
+  static constexpr double kWallsFloor = 0.75 * M_PI / 180.0;     // best case, wall-map measurement
+  static constexpr double kRejectInflate = 2.0 * M_PI / 180.0;   // after a rejection: no lock-out
+  static constexpr double kManhattanFloor = 1.5 * M_PI / 180.0;  // off-axis walls can bias Manhattan
+  static constexpr double kManhattanInlier = 4.0 * M_PI / 180.0;
+  static constexpr double kGateSigmas = 3.0;
+  static constexpr size_t kMaxWallPoints = 100;
 
   // Recording
   std::string record_dir_;

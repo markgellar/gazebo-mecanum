@@ -85,7 +85,9 @@ def launch_setup(context):
                     package='mecanum_robot',
                     executable='sparse_slam',
                     output='screen',
-                    parameters=[{'use_sim_time': True, 'record_dir': record_dir}],
+                    # The sim robot spawns facing +x in an axis-aligned world, so the walls' axes are known.
+                    # On the real robot leave manhattan_axes_deg unset: it is learned from the first spin.
+                    parameters=[{'use_sim_time': True, 'record_dir': record_dir, 'manhattan_axes_deg': 0.0}],
                 ),
 
                 # IMU relay

@@ -2,11 +2,29 @@ import os
 import time
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, SetEnvironmentVariable, TimerAction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, SetEnvironmentVariable, TimerAction
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 import xacro
 
+
 def generate_launch_description():
+    return LaunchDescription([
+        DeclareLaunchArgument('gui', default_value='true', description='false = gzserver only (headless)'),
+        DeclareLaunchArgument('seed', default_value='', description='noise seed for odom/IMU drift (default: fixed)'),
+        OpaqueFunction(function=launch_setup),
+    ])
+
+
+def launch_setup(context):
+    gui = LaunchConfiguration('gui').perform(context).lower() != 'false'
+    seed = LaunchConfiguration('seed').perform(context)
+    odom_noise_params = {'use_sim_time': True}
+    imu_params = {'use_sim_time': True}
+    if seed:
+        odom_noise_params['seed'] = int(seed)
+        imu_params['seed'] = int(seed) + 1000
+
     pkg_path = get_package_share_directory('mecanum_robot')
     urdf_file = os.path.join(pkg_path, 'urdf', 'mecanum_robot.urdf.xacro')
     world_file = os.path.join(pkg_path, 'worlds', 'obstacles.world')
@@ -15,7 +33,7 @@ def generate_launch_description():
 
     robot_description = xacro.process_file(urdf_file).toxml()
 
-    return LaunchDescription([
+    return [
         # Point Gazebo to mesh files
         SetEnvironmentVariable(
             name='GAZEBO_MODEL_PATH',
@@ -24,7 +42,7 @@ def generate_launch_description():
 
         # Start Gazebo
         ExecuteProcess(
-            cmd=['gazebo', '--verbose', world_file,
+            cmd=['gazebo' if gui else 'gzserver', '--verbose', world_file,
             '-s', 'libgazebo_ros_init.so',
             '-s', 'libgazebo_ros_factory.so'],
             output='screen',
@@ -76,7 +94,7 @@ def generate_launch_description():
                     executable='imu_relay.py',
                     name='imu_relay',
                     output='screen',
-                    parameters=[{'use_sim_time': True}],
+                    parameters=[imu_params],
                 ),
 
                 # Odometry noise: realistic drift between Gazebo's perfect /odom and the EKF
@@ -85,7 +103,7 @@ def generate_launch_description():
                     executable='odom_noise.py',
                     name='odom_noise',
                     output='screen',
-                    parameters=[{'use_sim_time': True}],
+                    parameters=[odom_noise_params],
                 ),
 
                 # Pose error vs ground truth (observe only). 'map' = SLAM-corrected pose, 'odom' = EKF alone.
@@ -114,4 +132,4 @@ def generate_launch_description():
                 ),
             ],
         ),
-    ])
+    ]

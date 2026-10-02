@@ -25,6 +25,8 @@ struct Ray {
   double ex, ey;     // centre-line end (range along the sensor axis, or max range)
   bool hit;
   double half_fov;   // cone half-angle, rad
+  int sensor = -1;   // index into the sensor list (front, rear_right, rear_left, left, right)
+  double stamp = 0;  // reading time, s
 };
 
 // Outcome of matching one spin scan against the map
@@ -124,11 +126,12 @@ public:
       "front_tof", "rear_right_tof", "rear_left_tof", "left_tof", "right_tof"
     };
 
-    for (const auto& name : sensor_names) {
+    for (size_t i = 0; i < sensor_names.size(); i++) {
+      const std::string name = sensor_names[i];
       auto sub = create_subscription<sensor_msgs::msg::Range>(
         name + "/range", 10,
-        [this, name](const sensor_msgs::msg::Range::SharedPtr msg) {
-          handle_range(msg, name + "_link");
+        [this, name, i](const sensor_msgs::msg::Range::SharedPtr msg) {
+          handle_range(msg, name + "_link", static_cast<int>(i));
         });
       range_subs_.push_back(sub);
       RCLCPP_INFO(get_logger(), "Subscribed to %s/range", name.c_str());
@@ -158,7 +161,7 @@ public:
 
 private:
   void handle_range(const sensor_msgs::msg::Range::SharedPtr msg,
-                    const std::string& frame_id)
+                    const std::string& frame_id, int sensor)
   {
     RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
       "ToF %s: range=%.3f min=%.3f max=%.3f",
@@ -203,6 +206,8 @@ private:
     ray.ey = sensor_y + range * std::sin(sensor_yaw);
     ray.hit = hit_obstacle;
     ray.half_fov = msg->field_of_view > 0.0f ? msg->field_of_view / 2.0 : default_half_fov_;
+    ray.sensor = sensor;
+    ray.stamp = rclcpp::Time(msg->header.stamp).seconds();
 
     // During a spin, hold readings back so the scan can be matched before it enters the map
     if (scanning_) {
@@ -335,10 +340,11 @@ private:
     std::string prefix = record_dir_ + "/" + base;
 
     std::vector<double> rays;
-    rays.reserve(scan_buffer_.size() * 6);
+    rays.reserve(scan_buffer_.size() * 8);
     double cx = 0.0, cy = 0.0;
     for (const auto& r : scan_buffer_) {
-      rays.insert(rays.end(), {r.sx, r.sy, r.ex, r.ey, r.hit ? 1.0 : 0.0, r.half_fov});
+      rays.insert(rays.end(), {r.sx, r.sy, r.ex, r.ey, r.hit ? 1.0 : 0.0, r.half_fov,
+                               static_cast<double>(r.sensor), r.stamp});
       double mx, my;
       odom_to_map(r.sx, r.sy, mx, my);
       cx += mx;
@@ -348,7 +354,7 @@ private:
       cx /= scan_buffer_.size();
       cy /= scan_buffer_.size();
     }
-    write_npy(prefix + "_rays.npy", "<f8", sizeof(double), rays.data(), scan_buffer_.size(), 6);
+    write_npy(prefix + "_rays.npy", "<f8", sizeof(double), rays.data(), scan_buffer_.size(), 8);
 
     // Map crop (log-odds) centred on the robot, big enough for sensor range + the widest search
     int half = static_cast<int>(std::ceil(3.5 / resolution_));

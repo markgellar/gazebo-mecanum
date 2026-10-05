@@ -8,6 +8,8 @@
 
 // Set to 1 to print a marker on every loop/publish (floods the serial monitor; only for crash hunting)
 #define DEBUG_TRACE 0
+// Set to 1 to print how long each loop() handler takes, every 5 s (to find what limits the rates)
+#define DEBUG_TIMING 0
 #if DEBUG_TRACE
 #define TRACE(msg) Serial.println(msg)
 #else
@@ -19,6 +21,7 @@
 #define TOF_DAT 19
 
 int TOF_ADDR[] = { 10, 11, 12, 13, 14 };
+bool tofOk[] = { false, false, false, false, false };   // started successfully; dead ones aren't polled
 
 #define DEG / 180.0 * 3.1415926
 #define INCH * 0.0254
@@ -97,6 +100,9 @@ float laserMin = 0.05;
 float laserMax = 2.0;
 float laserReadings[] = { 0.0, 0.0, 0.0, 0.0, 0.0 };   // from robot centre (sensor range + laserDists), for wall following
 float rawRanges[] = { 0.0, 0.0, 0.0, 0.0, 0.0 };       // from the sensor face, for ROS (Range msgs use the sensor's frame)
+int64_t rangeStampNs[] = { 0, 0, 0, 0, 0 };            // when each reading was taken (ROS time)
+bool rangeFresh[] = { false, false, false, false, false };   // not yet published
+int64_t rosTimeNs();
 
 #define CELL_SIZE 0.05f
 #define ARENA_WIDTH 1.524f
@@ -200,20 +206,26 @@ void initLasers() {
     delay(10);
     digitalWrite(TOF_CLK, LOW);
     delay(10);
-    Serial.println(tof[i].begin(TOF_ADDR[i], true, &Wire, Adafruit_VL53L0X::VL53L0X_SENSE_DEFAULT));
+    tofOk[i] = tof[i].begin(TOF_ADDR[i], true, &Wire, Adafruit_VL53L0X::VL53L0X_SENSE_DEFAULT);
+    Serial.println(tofOk[i]);
   }
 
   delay(10);
 
   for (int i = 0; i < 5; i++) {
-    tof[i].startRangeContinuous();
+    if (tofOk[i]) tof[i].startRangeContinuous();
   }
+  // A sensor that didn't start would cost an I2C timeout on every poll and stall the whole loop
+  Serial.printf("ToF sensors started: %d %d %d %d %d (front, right, rear_right, rear_left, left)\n",
+                tofOk[0], tofOk[1], tofOk[2], tofOk[3], tofOk[4]);
 }
 
 void readLasers() {
-  int ambad = 0;
+  int ambad = 0, active = 0;
 
   for (int i = 0; i < 5; i++) {
+    if (!tofOk[i]) continue;
+    active++;
     if (tof[i].isRangeComplete()) {
       int range = tof[i].readRangeResult();
 
@@ -231,10 +243,12 @@ void readLasers() {
         laserReadings[i] = -1.0;
         rawRanges[i] = -1.0;
       }
+      rangeStampNs[i] = rosTimeNs();
+      rangeFresh[i] = true;
     }
   }
 
-  if (ambad == 5) {
+  if (active > 0 && ambad == active) {   // every working sensor stopped answering: restart them
     initLasers();
   }
 }
@@ -1010,21 +1024,21 @@ integrate:
 }
 
 void readIMU() {
-  Serial.println("IMU1");
+  TRACE("IMU1");
   if (!gyro_calibrated) return;
 
   // Read accel (0x28-0x2D)
-  Serial.println("IMU2");
+  TRACE("IMU2");
   Wire.beginTransmission(IMU_ADDR);
   Wire.write(0x28);
   Wire.endTransmission();
   uint8_t received = Wire.requestFrom(IMU_ADDR, 6);
   if (received < 6) return;
-  Serial.println("IMU3");
+  TRACE("IMU3");
   int16_t ax_raw = Wire.read() | (Wire.read() << 8);
   int16_t ay_raw = Wire.read() | (Wire.read() << 8);
   int16_t az_raw = Wire.read() | (Wire.read() << 8);
-  Serial.println("IMU4");
+  TRACE("IMU4");
   Serial.printf("Free heap: %lu\n", esp_get_free_heap_size());
 
   // Read gyro (0x22-0x27)
@@ -1038,12 +1052,12 @@ void readIMU() {
   received = Wire.requestFrom(IMU_ADDR, 6);
   Serial.println("IMU4e");
   if (received < 6) return;
-  Serial.println("IMU5");
+  TRACE("IMU5");
   int16_t gx_raw = Wire.read() | (Wire.read() << 8);
   int16_t gy_raw = Wire.read() | (Wire.read() << 8);
   int16_t gz_raw = Wire.read() | (Wire.read() << 8);
 
-  Serial.println("IMU6");
+  TRACE("IMU6");
   imu_ax = ax_raw * 0.001197f;
   imu_ay = ay_raw * 0.001197f;
   imu_az = az_raw * 0.001197f;
@@ -1052,11 +1066,11 @@ void readIMU() {
   imu_gz = gz_raw * 0.000153f - gyro_bias_z;
 
   // High beta for first 3 seconds to converge heading, then lower for stability
-  Serial.println("IMU7");
+  TRACE("IMU7");
   static int imuCount = 0;
   imuCount++;
 
-  Serial.println("IMU8");
+  TRACE("IMU8");
   if (imuCount < 500) {
     beta = 0.5f;            // first 5 seconds: converge fast
   } else if (imuCount < 1000) {
@@ -1086,7 +1100,7 @@ void readIMU() {
                        imu_ax, imu_ay, imu_az,
                        0.01f);
   }
-  Serial.println("IMU9");
+  TRACE("IMU9");
 
   static int printCount = 0;
   if (++printCount >= 50) {
@@ -1127,7 +1141,6 @@ rcl_publisher_t odom_pub;
 
 sensor_msgs__msg__Imu imu_msg;
 sensor_msgs__msg__Range tof_msg;
-int tof_cycle = 0;
 nav_msgs__msg__Odometry odom_msg;
 
 bool microros_connected = false;
@@ -1353,11 +1366,14 @@ void connectMicroROS() {
   Serial.println("Creating publishers...");
   rcl_ret_t ret2;
 
-  ret2 = rclc_publisher_init_default(&imu_pub, &node,
+  // Best effort for the sensor streams: no waiting for an ack per message (a lost one is replaced
+  // a few ms later). Odometry stays reliable: at ~700 bytes it exceeds the 512-byte transport MTU,
+  // and only reliable streams can fragment.
+  ret2 = rclc_publisher_init_best_effort(&imu_pub, &node,
     ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu), "imu/data");
   Serial.printf("IMU pub: %ld\n", ret2);
 
-  ret2 = rclc_publisher_init_default(&tof_pub, &node,
+  ret2 = rclc_publisher_init_best_effort(&tof_pub, &node,
     ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range), "tof/range");
   Serial.printf("ToF pub: %ld\n", ret2);
 
@@ -1409,6 +1425,28 @@ void initMessages() {
   odom_msg.child_frame_id.capacity = 10;
 }
 
+// Current time in ROS (agent) time; boot time until the clock has been synced
+int64_t rosTimeNs() {
+  return rmw_uros_epoch_synchronized() ? rmw_uros_epoch_nanos() : esp_timer_get_time() * 1000LL;
+}
+
+// Each ToF reading as soon as it arrives, stamped when it was read: during a 0.5 rad/s spin the
+// robot turns ~1 deg between readings, so late or batched stamps would smear the walls.
+void publishRanges() {
+  if (!microros_connected) return;
+  for (int i = 0; i < 5; i++) {
+    if (!rangeFresh[i]) continue;
+    rangeFresh[i] = false;
+    tof_msg.header.stamp.sec = rangeStampNs[i] / 1000000000LL;
+    tof_msg.header.stamp.nanosec = rangeStampNs[i] % 1000000000LL;
+    tof_msg.header.frame_id.data = (char*)tof_frame_ids[i];
+    tof_msg.header.frame_id.size = strlen(tof_frame_ids[i]);
+    tof_msg.header.frame_id.capacity = strlen(tof_frame_ids[i]) + 1;
+    tof_msg.range = rawRanges[i] > 0 ? rawRanges[i] : INFINITY;
+    rcl_ret_t rc __attribute__((unused)) = rcl_publish(&tof_pub, &tof_msg, NULL);
+  }
+}
+
 void publishToROS() {
   if (!microros_connected) return;
 
@@ -1421,9 +1459,7 @@ void publishToROS() {
     rmw_uros_sync_session(100);
   }
 
-  // Current time in ROS (agent) time
-  int64_t now_ns = rmw_uros_epoch_synchronized() ? rmw_uros_epoch_nanos()
-                                                 : esp_timer_get_time() * 1000LL;   // fallback: boot time
+  int64_t now_ns = rosTimeNs();
   int32_t sec = now_ns / 1000000000LL;
   uint32_t nsec = now_ns % 1000000000LL;
 
@@ -1446,16 +1482,6 @@ void publishToROS() {
   TRACE("PUB3");
   rcl_ret_t rc __attribute__((unused));
   rc = rcl_publish(&imu_pub, &imu_msg, NULL);
-
-  // Publish ToF readings
-  tof_msg.header.stamp.sec = sec;
-  tof_msg.header.stamp.nanosec = nsec;
-  tof_msg.header.frame_id.data = (char*)tof_frame_ids[tof_cycle];
-  tof_msg.header.frame_id.size = strlen(tof_frame_ids[tof_cycle]);
-  tof_msg.header.frame_id.capacity = strlen(tof_frame_ids[tof_cycle]) + 1;
-  tof_msg.range = rawRanges[tof_cycle] > 0 ? rawRanges[tof_cycle] : INFINITY;
-  rc = rcl_publish(&tof_pub, &tof_msg, NULL);
-  tof_cycle = (tof_cycle + 1) % 5;
 
   // Publish odometry
   odom_msg.header.stamp.sec = sec;
@@ -1499,6 +1525,8 @@ void setup() {
     Serial.println("Wire.begin FAILED");
     while(1) delay(100);
   }
+  // A device that stops answering mid-run costs at most this per transaction (default is 50 ms)
+  Wire.setTimeOut(10);
 
   initIMU();
   calibrateGyro();
@@ -1546,18 +1574,58 @@ void manageMicroROS() {
   }
 }
 
-int delayTimesMS[] = {     10,         25,             100,         100,            50,     1000,               3000,};
-void (*handlers[])() = { readIMU, readDeadReckon, readLasers, centralCommand, publishToROS, renav, manageMicroROS, };
+int delayTimesMS[] = {     10,         25,             20,          100,            50,     1000,           3000,          20,};
+void (*handlers[])() = { readIMU, readDeadReckon, readLasers, centralCommand, publishToROS, renav, manageMicroROS, publishRanges, };
 long lastTimes[sizeof(delayTimesMS) / sizeof(delayTimesMS[0])];
+const char* handlerNames[] = { "readIMU", "readDeadReckon", "readLasers", "centralCommand", "publishToROS", "renav", "manageMicroROS", "publishRanges" };
+#define NUM_HANDLERS (sizeof(delayTimesMS) / sizeof(delayTimesMS[0]))
+
+#if DEBUG_TIMING
+int64_t handlerTotalUs[NUM_HANDLERS];
+int64_t handlerMaxUs[NUM_HANDLERS];
+uint32_t handlerCalls[NUM_HANDLERS];
+uint32_t loopPasses = 0;
+int64_t lastTimingReport = 0;
+
+void reportTiming() {
+  int64_t now = esp_timer_get_time();
+  if (now - lastTimingReport < 5000000) return;
+  float secs = (now - lastTimingReport) / 1e6f;
+  Serial.printf("--- timing over %.1f s: %.1f loop passes/s\n", secs, loopPasses / secs);
+  for (size_t i = 0; i < NUM_HANDLERS; i++) {
+    if (handlerCalls[i] == 0) continue;
+    Serial.printf("  %-15s %6.1f calls/s  avg %7.2f ms  max %7.2f ms  (%4.1f%% of time)\n", handlerNames[i],
+                  handlerCalls[i] / secs, handlerTotalUs[i] / 1000.0f / handlerCalls[i], handlerMaxUs[i] / 1000.0f,
+                  handlerTotalUs[i] / 10000.0f / secs);
+    handlerTotalUs[i] = handlerMaxUs[i] = 0;
+    handlerCalls[i] = 0;
+  }
+  loopPasses = 0;
+  lastTimingReport = now;
+}
+#endif
 
 void loop() {
   TRACE("LOOP");
   long time = millis();
-  for (int i = 0; i < sizeof(delayTimesMS) / sizeof(delayTimesMS[0]); i++) {
+  for (size_t i = 0; i < NUM_HANDLERS; i++) {
     if (time - lastTimes[i] > delayTimesMS[i]) {
       lastTimes[i] = time;
+#if DEBUG_TIMING
+      int64_t t0 = esp_timer_get_time();
       (*handlers[i])();
+      int64_t dt = esp_timer_get_time() - t0;
+      handlerTotalUs[i] += dt;
+      if (dt > handlerMaxUs[i]) handlerMaxUs[i] = dt;
+      handlerCalls[i]++;
+#else
+      (*handlers[i])();
+#endif
       time = millis();
     }
   }
+#if DEBUG_TIMING
+  loopPasses++;
+  reportTiming();
+#endif
 }

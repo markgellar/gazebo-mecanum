@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Range
 
 class TofSplitter(Node):
     def __init__(self):
         super().__init__('tof_splitter')
-        self.sub = self.create_subscription(Range, 'tof/range', self.callback, 10)
+        # The robot publishes ToF best effort (no per-message acks over WiFi); a reliable subscription
+        # would be incompatible and receive nothing. Republished below with default (reliable) QoS.
+        self.sub = self.create_subscription(Range, 'tof/range', self.callback, qos_profile_sensor_data)
         self.pubs = {
             'front_tof_link': self.create_publisher(Range, 'front_tof/range', 10),
             'right_tof_link': self.create_publisher(Range, 'right_tof/range', 10),

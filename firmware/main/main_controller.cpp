@@ -1512,12 +1512,42 @@ void setup() {
   Serial.println("Setup complete (connecting to micro-ROS agent in the background)");
 }
 
-void tryConnectMicroROS() {
-  if (!microros_connected) connectMicroROS();
+// Drop a session whose agent has gone away (e.g. the launch was restarted), so we reconnect to the
+// new one instead of publishing into the void forever.
+void disconnectMicroROS() {
+  // Don't wait on the vanished agent while destroying entities
+  rmw_context_t* rmw_context = rcl_context_get_rmw_context(&support.context);
+  rmw_uros_set_context_entity_destroy_session_timeout(rmw_context, 0);
+
+  rcl_ret_t rc __attribute__((unused));
+  rc = rcl_publisher_fini(&imu_pub, &node);
+  rc = rcl_publisher_fini(&tof_pub, &node);
+  rc = rcl_publisher_fini(&odom_pub, &node);
+  rc = rcl_node_fini(&node);
+  rclc_support_fini(&support);
+  microros_connected = false;
+  Serial.println("micro-ROS agent lost; reconnecting...");
+}
+
+// Every 3 s: connect if we aren't, otherwise check the agent is still there (two failed checks in a
+// row, ~6 s, means it's gone). Pings are quick (up to 3 x 100 ms) so the sensors barely notice.
+void manageMicroROS() {
+  static int missed = 0;
+  if (!microros_connected) {
+    missed = 0;
+    connectMicroROS();
+    return;
+  }
+  if (rmw_uros_ping_agent(100, 3) == RMW_RET_OK) {
+    missed = 0;
+  } else if (++missed >= 2) {
+    disconnectMicroROS();
+    missed = 0;
+  }
 }
 
 int delayTimesMS[] = {     10,         25,             100,         100,            50,     1000,               3000,};
-void (*handlers[])() = { readIMU, readDeadReckon, readLasers, centralCommand, publishToROS, renav, tryConnectMicroROS, };
+void (*handlers[])() = { readIMU, readDeadReckon, readLasers, centralCommand, publishToROS, renav, manageMicroROS, };
 long lastTimes[sizeof(delayTimesMS) / sizeof(delayTimesMS[0])];
 
 void loop() {

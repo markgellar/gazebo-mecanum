@@ -6,6 +6,14 @@
 #include <string.h>
 #include <queue>
 
+// Set to 1 to print a marker on every loop/publish (floods the serial monitor; only for crash hunting)
+#define DEBUG_TRACE 0
+#if DEBUG_TRACE
+#define TRACE(msg) Serial.println(msg)
+#else
+#define TRACE(msg)
+#endif
+
 #define MOTOR_ADDR 1
 #define TOF_CLK 18
 #define TOF_DAT 19
@@ -82,7 +90,8 @@ float finalCoords[] = { 0.0, 0.0, 0.0 };
 
 float laserMin = 0.05;
 float laserMax = 2.0;
-float laserReadings[] = { 0.0, 0.0, 0.0, 0.0, 0.0 };
+float laserReadings[] = { 0.0, 0.0, 0.0, 0.0, 0.0 };   // from robot centre (sensor range + laserDists), for wall following
+float rawRanges[] = { 0.0, 0.0, 0.0, 0.0, 0.0 };       // from the sensor face, for ROS (Range msgs use the sensor's frame)
 
 #define CELL_SIZE 0.05f
 #define ARENA_WIDTH 1.524f
@@ -210,10 +219,13 @@ void readLasers() {
         ambad++;
       }
 
-      if (range < 3000 && range > 30)
+      if (range < 3000 && range > 30) {
         laserReadings[i] = range / 1000.0 + laserDists[i];
-      else
+        rawRanges[i] = range / 1000.0;
+      } else {
         laserReadings[i] = -1.0;
+        rawRanges[i] = -1.0;
+      }
     }
   }
 
@@ -1088,7 +1100,7 @@ void readIMU() {
 #include <WiFi.h>
 // #include <std_msgs/msg/float32_multi_array.h>
 
-#define AGENT_IP "192.168.4.2"
+#define AP_AGENT_IP "192.168.4.2"   // the laptop, when it joins our own access point
 #define AGENT_PORT 9999
 #define AGENT_PORT_STR "9999"
 
@@ -1129,14 +1141,64 @@ const char* tof_topic_names[] = {
 #include <esp_event.h>
 #include <nvs_flash.h>
 
-void initWiFi() {
-  nvs_flash_init();
-  esp_netif_init();
-  esp_event_loop_create_default();
-  esp_netif_create_default_wifi_ap();
+// Home WiFi credentials and the laptop's address on it live in wifi_secrets.h (gitignored; copy
+// wifi_secrets.h.example). Without that file the robot always runs its own access point, as before.
+#if __has_include("wifi_secrets.h")
+#include "wifi_secrets.h"
+#endif
 
-  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-  esp_wifi_init(&cfg);
+char agent_addr[16] = AP_AGENT_IP;   // micro-ROS agent (the laptop); set by initWiFi()
+
+static EventGroupHandle_t wifi_events;
+static const EventBits_t WIFI_GOT_IP = BIT0;
+static bool home_wifi_mode = false;
+
+static void wifi_event_handler(void* arg, esp_event_base_t base, int32_t id, void* data) {
+  if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED && home_wifi_mode) {
+    xEventGroupClearBits(wifi_events, WIFI_GOT_IP);
+    esp_wifi_connect();   // keep trying: routers drop clients now and then
+  } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+    xEventGroupSetBits(wifi_events, WIFI_GOT_IP);
+  }
+}
+
+// Station mode: join the home network like any other device, so the laptop keeps its internet
+bool joinHomeWifi(int timeout_ms) {
+#ifdef HOME_WIFI_SSID
+  esp_netif_t* sta = esp_netif_create_default_wifi_sta();
+  esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL);
+  esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL);
+
+  wifi_config_t wifi_config = {};
+  strncpy((char*)wifi_config.sta.ssid, HOME_WIFI_SSID, sizeof(wifi_config.sta.ssid));
+  strncpy((char*)wifi_config.sta.password, HOME_WIFI_PASSWORD, sizeof(wifi_config.sta.password));
+
+  home_wifi_mode = true;
+  esp_wifi_set_mode(WIFI_MODE_STA);
+  esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+  esp_wifi_start();
+  esp_wifi_set_ps(WIFI_PS_NONE);   // no power-save naps: they add ~100 ms latency to every message
+  esp_wifi_connect();
+
+  Serial.printf("Joining home WiFi \"%s\"...\n", HOME_WIFI_SSID);
+  EventBits_t bits = xEventGroupWaitBits(wifi_events, WIFI_GOT_IP, pdFALSE, pdTRUE, pdMS_TO_TICKS(timeout_ms));
+  if (bits & WIFI_GOT_IP) {
+    esp_netif_ip_info_t ip;
+    esp_netif_get_ip_info(sta, &ip);
+    Serial.printf("Joined home WiFi as " IPSTR ", agent expected at %s\n", IP2STR(&ip.ip), HOME_AGENT_IP);
+    return true;
+  }
+  home_wifi_mode = false;
+  esp_wifi_disconnect();
+  esp_wifi_stop();
+  Serial.println("Home WiFi not available");
+#endif
+  return false;
+}
+
+// Access point mode: the robot runs its own network "MecanumRobot" (laptop joins it as 192.168.4.2)
+void startAccessPoint() {
+  esp_netif_create_default_wifi_ap();
 
   wifi_config_t wifi_config = {};
   strcpy((char*)wifi_config.ap.ssid, "MecanumRobot");
@@ -1150,7 +1212,27 @@ void initWiFi() {
   esp_wifi_set_config(WIFI_IF_AP, &wifi_config);
   esp_wifi_start();
 
-  Serial.println("AP started at: 192.168.4.1");
+  strcpy(agent_addr, AP_AGENT_IP);
+  Serial.println("AP \"MecanumRobot\" started at 192.168.4.1, agent expected at " AP_AGENT_IP);
+}
+
+// Home WiFi first (laptop keeps internet); our own access point if it isn't there (e.g. at a demo)
+void initWiFi() {
+  nvs_flash_init();
+  esp_netif_init();
+  esp_event_loop_create_default();
+  wifi_events = xEventGroupCreate();
+
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  esp_wifi_init(&cfg);
+
+#ifdef HOME_WIFI_SSID
+  if (joinHomeWifi(10000)) {
+    strncpy(agent_addr, HOME_AGENT_IP, sizeof(agent_addr) - 1);
+    return;
+  }
+#endif
+  startAccessPoint();
 }
 
 void initMessages();
@@ -1182,7 +1264,7 @@ bool uros_open(uxrCustomTransport* transport) {
 
   uros_agent_addr.sin_family = AF_INET;
   uros_agent_addr.sin_port = htons(AGENT_PORT);
-  inet_aton(AGENT_IP, &uros_agent_addr.sin_addr);
+  inet_aton(agent_addr, &uros_agent_addr.sin_addr);
 
   return true;
 }
@@ -1213,21 +1295,36 @@ size_t uros_read(uxrCustomTransport* transport, uint8_t* buf, size_t len, int ti
 
 }
 
-void initMicroROS() {
-  delay(20000);
-  Serial.println("Connecting to micro-ROS agent...");
+// Try to connect to the micro-ROS agent. Called every few seconds from loop() until it succeeds, so
+// the agent and the PC's WiFi can come up in any order. A quick ping first keeps a failed attempt to
+// ~100 ms instead of blocking the sensors for seconds.
+void connectMicroROS() {
+  static int attempts = 0;
+  attempts++;
 
   allocator = rcl_get_default_allocator();
 
   rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
   rcl_ret_t rc2 __attribute__((unused)) = rcl_init_options_init(&init_options, allocator);
   rmw_init_options_t* rmw_options = rcl_init_options_get_rmw_init_options(&init_options);
-  rmw_uros_options_set_udp_address(AGENT_IP, AGENT_PORT_STR, rmw_options);
+  rmw_uros_options_set_udp_address(agent_addr, AGENT_PORT_STR, rmw_options);
 
-  Serial.println("Initializing support...");
+  if (rmw_uros_ping_agent_options(100, 1, rmw_options) != RMW_RET_OK) {
+    if (attempts % 10 == 1) {   // don't flood the log: report every 10th try (~30 s)
+      Serial.printf("micro-ROS agent not reachable at %s:%s (attempt %d), retrying...\n", agent_addr, AGENT_PORT_STR, attempts);
+    }
+    rcl_init_options_fini(&init_options);
+    return;
+  }
+
+  Serial.printf("Agent found (attempt %d), connecting...\n", attempts);
   rcl_ret_t ret;
   ret = rclc_support_init_with_options(&support, 0, NULL, &init_options, &allocator);
-  if (ret != RCL_RET_OK) { Serial.printf("Support init failed: %ld\n", ret); return; }
+  if (ret != RCL_RET_OK) {
+    Serial.printf("Support init failed: %ld\n", ret);
+    rcl_init_options_fini(&init_options);
+    return;
+  }
 
   Serial.println("Creating node...");
   // ret = rclc_node_init_default(&node, "mecanum_robot", "", &support);
@@ -1236,7 +1333,11 @@ void initMicroROS() {
   node_options.enable_rosout = false;
   node_options.use_global_arguments = false;
   ret = rcl_node_init(&node, "mecanum_robot", "", &support.context, &node_options);
-  if (ret != RCL_RET_OK) { Serial.printf("Node init failed: %ld\n", ret); return; }
+  if (ret != RCL_RET_OK) {
+    Serial.printf("Node init failed: %ld\n", ret);
+    rclc_support_fini(&support);
+    return;
+  }
 
   Serial.println("Creating publishers...");
   rcl_ret_t ret2;
@@ -1252,6 +1353,14 @@ void initMicroROS() {
   ret2 = rclc_publisher_init_default(&odom_pub, &node,
     ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry), "odom");
   Serial.printf("Odom pub: %ld\n", ret2);
+
+  // Sync our clock with the agent so message stamps are in ROS time. sparse_slam looks up each
+  // reading's pose in TF at its stamp; boot-clock stamps (1970) would get every reading dropped.
+  if (rmw_uros_sync_session(1000) == RMW_RET_OK) {
+    Serial.println("Time synced with agent");
+  } else {
+    Serial.println("Time sync FAILED: message stamps will be wrong");
+  }
 
   initMessages();
   microros_connected = true;
@@ -1292,15 +1401,22 @@ void initMessages() {
 void publishToROS() {
   if (!microros_connected) return;
 
-  Serial.println("PUB1");
+  TRACE("PUB1");
 
-  // Get current time from agent
-  struct timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
-  int32_t sec = ts.tv_sec;
-  uint32_t nsec = ts.tv_nsec;
+  // Re-sync every minute: the ESP32's clock drifts against the PC's
+  static uint32_t lastSync = millis();
+  if (millis() - lastSync > 60000) {
+    lastSync = millis();
+    rmw_uros_sync_session(100);
+  }
 
-  Serial.println("PUB2");
+  // Current time in ROS (agent) time
+  int64_t now_ns = rmw_uros_epoch_synchronized() ? rmw_uros_epoch_nanos()
+                                                 : esp_timer_get_time() * 1000LL;   // fallback: boot time
+  int32_t sec = now_ns / 1000000000LL;
+  uint32_t nsec = now_ns % 1000000000LL;
+
+  TRACE("PUB2");
 
   // Publish IMU
   imu_msg.header.stamp.sec = sec;
@@ -1316,7 +1432,7 @@ void publishToROS() {
   imu_msg.linear_acceleration.y = imu_ay;
   imu_msg.linear_acceleration.z = imu_az;
   
-  Serial.println("PUB3");
+  TRACE("PUB3");
   rcl_ret_t rc __attribute__((unused));
   rc = rcl_publish(&imu_pub, &imu_msg, NULL);
 
@@ -1326,7 +1442,7 @@ void publishToROS() {
   tof_msg.header.frame_id.data = (char*)tof_frame_ids[tof_cycle];
   tof_msg.header.frame_id.size = strlen(tof_frame_ids[tof_cycle]);
   tof_msg.header.frame_id.capacity = strlen(tof_frame_ids[tof_cycle]) + 1;
-  tof_msg.range = laserReadings[tof_cycle] > 0 ? laserReadings[tof_cycle] : INFINITY;
+  tof_msg.range = rawRanges[tof_cycle] > 0 ? rawRanges[tof_cycle] : INFINITY;
   rc = rcl_publish(&tof_pub, &tof_msg, NULL);
   tof_cycle = (tof_cycle + 1) % 5;
 
@@ -1347,7 +1463,7 @@ void publishToROS() {
   odom_msg.pose.covariance[7] = 0.01;   // y
   odom_msg.pose.covariance[35] = 0.03;  // yaw
   
-  Serial.println("PUB5");
+  TRACE("PUB5");
   rc = rcl_publish(&odom_pub, &odom_msg, NULL);
 }
 
@@ -1368,17 +1484,20 @@ void setup() {
   memset(inflated_grid, 0, GRID_BYTES);
 
   initWiFi();
-  initMicroROS();
 
-  Serial.println("Setup complete");
+  Serial.println("Setup complete (connecting to micro-ROS agent in the background)");
 }
 
-int delayTimesMS[] = {     10,         25,             100,         100,            50,     1000,};
-void (*handlers[])() = { readIMU, readDeadReckon, readLasers, centralCommand, publishToROS, renav, };
+void tryConnectMicroROS() {
+  if (!microros_connected) connectMicroROS();
+}
+
+int delayTimesMS[] = {     10,         25,             100,         100,            50,     1000,               3000,};
+void (*handlers[])() = { readIMU, readDeadReckon, readLasers, centralCommand, publishToROS, renav, tryConnectMicroROS, };
 long lastTimes[sizeof(delayTimesMS) / sizeof(delayTimesMS[0])];
 
 void loop() {
-  Serial.println("LOOP");
+  TRACE("LOOP");
   long time = millis();
   for (int i = 0; i < sizeof(delayTimesMS) / sizeof(delayTimesMS[0]); i++) {
     if (time - lastTimes[i] > delayTimesMS[i]) {

@@ -7,6 +7,17 @@ ekf_filter_node:
     frequency: 50.0
     two_d_mode: true
 
+    # Wheel odometry from the firmware: robot-frame velocities only. The EKF turns them into motion with
+    # its own heading (IMU), so wheel slip while turning doesn't wreck the heading.
+    odom0: /odom
+    odom0_config: [false, false, false,   # x, y, z
+                   false, false, false,   # roll, pitch, yaw
+                   true,  true,  false,   # vx, vy, vz
+                   false, false, false,   # vroll, vpitch, vyaw (IMU gyro is better)
+                   false, false, false]   # ax, ay, az
+    odom0_queue_size: 10
+    odom0_differential: false
+
     imu0: /imu/data
     imu0_config: [false, false, false,
                   false, false, true,

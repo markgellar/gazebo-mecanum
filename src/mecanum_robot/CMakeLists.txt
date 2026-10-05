@@ -60,7 +60,7 @@ install(TARGETS sparse_slam navigator
   DESTINATION lib/${PROJECT_NAME}
 )
 
-install(PROGRAMS scripts/imu_relay.py scripts/twist_relay.py scripts/odom_noise.py scripts/pose_error.py
+install(PROGRAMS scripts/imu_relay.py scripts/twist_relay.py scripts/odom_noise.py scripts/pose_error.py scripts/tof_splitter.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

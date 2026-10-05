@@ -86,7 +86,12 @@ float laserDefinitions[] = { 0 DEG, 90 DEG, 192 DEG, 168 DEG, 270 DEG };
 float laserDists[] =       { 0.12, 0.205/2, 0.125, 0.125, 0.205/2 };
 
 float deadReckonOffsetCoords[] = { 0.0, 0.0, 0.0 };
-float finalCoords[] = { 0.0, 0.0, 0.0 };
+float finalCoords[] = { 0.0, 0.0, 0.0 };   // x right, y forward (m), heading CLOCKWISE-positive (rad)
+
+// Wheel motion since the last /odom publish, in ROS's robot frame: +x right (m), +y forward (m),
+// rotation counterclockwise-positive (rad). Turned into velocities when published.
+float odomAccum[] = { 0.0, 0.0, 0.0 };
+uint32_t lastOdomPublishMs = 0;
 
 float laserMin = 0.05;
 float laserMax = 2.0;
@@ -258,6 +263,12 @@ void readDeadReckon() {
   deadReckonOffsetCoords[0] += (forwardsDead * sin(curRot) * deadScales[0] - strafeDead * cos(curRot) * deadScales[1]);
   deadReckonOffsetCoords[1] += (forwardsDead * cos(curRot) * deadScales[0] + strafeDead * sin(curRot) * deadScales[1]);
   deadReckonOffsetCoords[2] += (rotateDead) * deadScales[2];
+
+  // Same increments in the robot frame, for the ROS velocities. At heading 0 the update above moves
+  // x by -strafe*s1 (right) and y by forward*s0; the firmware heading turns clockwise, ROS yaw doesn't.
+  odomAccum[0] += -strafeDead * deadScales[1];
+  odomAccum[1] += forwardsDead * deadScales[0];
+  odomAccum[2] += -rotateDead * deadScales[2];
 
   updateCoords();
 }
@@ -1452,8 +1463,8 @@ void publishToROS() {
   odom_msg.pose.pose.position.x = finalCoords[0];
   odom_msg.pose.pose.position.y = finalCoords[1];
   odom_msg.pose.pose.position.z = 0;
-  // Heading to quaternion
-  float half_yaw = finalCoords[2] / 2.0f;
+  // Heading to quaternion. ROS yaw is counterclockwise-positive, the firmware heading clockwise.
+  float half_yaw = -finalCoords[2] / 2.0f;
   odom_msg.pose.pose.orientation.w = cos(half_yaw);
   odom_msg.pose.pose.orientation.x = 0;
   odom_msg.pose.pose.orientation.y = 0;
@@ -1462,6 +1473,19 @@ void publishToROS() {
   odom_msg.pose.covariance[0] = 0.01;   // x
   odom_msg.pose.covariance[7] = 0.01;   // y
   odom_msg.pose.covariance[35] = 0.03;  // yaw
+
+  // Velocities in the robot frame (what the EKF fuses): wheel motion since the last publish / time
+  uint32_t nowMs = millis();
+  float dt = (nowMs - lastOdomPublishMs) / 1000.0f;
+  bool haveDt = lastOdomPublishMs != 0 && dt > 0.0f;
+  odom_msg.twist.twist.linear.x = haveDt ? odomAccum[0] / dt : 0.0f;
+  odom_msg.twist.twist.linear.y = haveDt ? odomAccum[1] / dt : 0.0f;
+  odom_msg.twist.twist.angular.z = haveDt ? odomAccum[2] / dt : 0.0f;
+  odomAccum[0] = odomAccum[1] = odomAccum[2] = 0.0f;
+  lastOdomPublishMs = nowMs;
+  odom_msg.twist.covariance[0] = 0.01;   // vx
+  odom_msg.twist.covariance[7] = 0.01;   // vy
+  odom_msg.twist.covariance[35] = 0.05;  // vyaw: mecanum wheels slip when turning
   
   TRACE("PUB5");
   rc = rcl_publish(&odom_pub, &odom_msg, NULL);

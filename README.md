@@ -26,6 +26,10 @@ Physical Robot (ESP32-C3)                    PC (WSL2 / Ubuntu 22.04)
 ## Hardware
 
 - **Chassis:** 3-tier laser-cut acrylic (8" x 10" footprint), custom 3D-printed motor mounts and sensor brackets, designed in SolidWorks
+
+![Robot with competition hardware](assets/hardware/robot_front.jpg)
+![Robot with SLAM hardware](assets/hardware/robot_front.jpg)
+
 - **Drivetrain:** 4 mecanum wheels with independent DC motors for omnidirectional movement (forward, strafe, rotation)
 - **Main Controller:** ESP32-C3 (M5Stamp C3, RISC-V, 160MHz)
 - **Motor Controller:** ItsyBitsy ATmega32U4, communicating via I2C

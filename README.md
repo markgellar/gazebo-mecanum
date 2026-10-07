@@ -27,17 +27,24 @@ Physical Robot (ESP32-C3)                    PC (WSL2 / Ubuntu 22.04)
 
 - **Chassis:** 3-tier laser-cut acrylic (8" x 10" footprint), custom 3D-printed motor mounts and sensor brackets, designed in SolidWorks
 
-![Robot with competition hardware](assets/hardware/robot_front.jpg)
-![Robot with SLAM hardware](assets/hardware/robot_front.jpg)
+![CAD Assembly with SLAM hardware](assets/cad/Isometric_Screenshot.png)
+![Robot with SLAM hardware](assets/hardware/Mecanum_Real.jpeg)
+![Robot with competition hardware](assets/hardware/Mecanum_Real_Competition.jpeg)
 
 - **Drivetrain:** 4 mecanum wheels with independent DC motors for omnidirectional movement (forward, strafe, rotation)
+
+![Mecanum base](assets/hardware/Base_Real.jpeg)
+
 - **Main Controller:** ESP32-C3 (M5Stamp C3, RISC-V, 160MHz)
 - **Motor Controller:** ItsyBitsy ATmega32U4, communicating via I2C
+
 - **Sensors:**
   - 5x VL53L0X time-of-flight ranging sensors (I2C, address-sequenced via D flip-flop shift register)
   - Adafruit LSM6DS3TR-C + LIS3MDL 9-DOF IMU with onboard Madgwick orientation filter
   - Wheel encoders for dead reckoning
 - **Electronics:** All circuits hand-soldered on perfboard with Molex/XT60 connectors, custom SN754410 H-bridge motor driver with AND/NOR gate complementary PWM generation
+
+![Main controller electronics](assets/hardware/Electronics_Real.jpeg)
 
 ## Repository Structure
 
@@ -87,11 +94,7 @@ The Gazebo simulation replicates the physical robot with:
 
 ```bash
 # Terminal 1: Launch everything (builds, sources, and starts Gazebo + all nodes)
-source /opt/ros/humble/setup.bash
-cd ~/mecanum_ws
-colcon build --base-paths src
-source install/setup.bash
-ros2 launch mecanum_robot gazebo.launch.py
+gazebo_start
 
 # Terminal 2: Visualize in RViz
 rviz2 --ros-args -p use_sim_time:=true
@@ -156,12 +159,12 @@ idf.py build
 idf.py -p /dev/ttyACM0 flash monitor
 ```
 
+## Demos
+The wall following algorithm takes advantage of the omnidirectional movement by strafing with the target wall in front or behind it. 
+![Wall Following (Competition Requirement)](assets/demos/Wall_Follow.gif)
+
 ## Future Work
 
-- **micro-ROS publishers:** Stream ToF, IMU, and odometry data over WiFi to the PC-side SLAM stack
-- **ICTE scan matching:** Implementation of Filotheou's correspondenceless scan-to-map matching algorithm for pose correction using the spin-scan data
-- **Magnetometer calibration:** Hard-iron offset characterization for absolute heading from the LIS3MDL
-- **Odometry noise injection:** Gaussian noise relay for realistic simulation testing
 - **Docker:** Containerized simulation stack with docker-compose for reproducible builds
 - **Map saving/loading:** Serialize occupancy grid for multi-session navigation
 

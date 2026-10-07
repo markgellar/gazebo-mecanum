@@ -9,7 +9,7 @@
 // Set to 1 to print a marker on every loop/publish (floods the serial monitor; only for crash hunting)
 #define DEBUG_TRACE 0
 // Set to 1 to print how long each loop() handler takes, every 5 s (to find what limits the rates)
-#define DEBUG_TIMING 0
+#define DEBUG_TIMING 1
 #if DEBUG_TRACE
 #define TRACE(msg) Serial.println(msg)
 #else
@@ -249,6 +249,7 @@ void readLasers() {
   }
 
   if (active > 0 && ambad == active) {   // every working sensor stopped answering: restart them
+    Serial.printf("ToF restart: all %d working sensors failed the I2C check (stalls the loop ~2 s)\n", active);
     initLasers();
   }
 }
@@ -1452,11 +1453,21 @@ void publishToROS() {
 
   TRACE("PUB1");
 
-  // Re-sync every minute: the ESP32's clock drifts against the PC's
+  // Re-sync every minute: the ESP32's clock drifts against the PC's. Log how far each re-sync moves
+  // the clock (expected: a few ms) so a bad sync can't go unnoticed.
   static uint32_t lastSync = millis();
   if (millis() - lastSync > 60000) {
     lastSync = millis();
-    rmw_uros_sync_session(100);
+    int64_t before = rmw_uros_epoch_nanos();
+    int64_t local0 = esp_timer_get_time();
+    rmw_ret_t sr = rmw_uros_sync_session(1000);
+    int64_t elapsedNs = (esp_timer_get_time() - local0) * 1000LL;
+    if (sr == RMW_RET_OK) {
+      Serial.printf("Time resync: clock moved %+.1f ms (took %.0f ms)\n",
+                    (rmw_uros_epoch_nanos() - before - elapsedNs) / 1e6, elapsedNs / 1e6);
+    } else {
+      Serial.println("Time resync FAILED (kept previous offset)");
+    }
   }
 
   int64_t now_ns = rosTimeNs();

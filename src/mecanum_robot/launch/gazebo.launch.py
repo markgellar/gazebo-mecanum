@@ -77,7 +77,7 @@ def launch_setup(context):
                         '-y', '0',
                         '-z', '0.04',
                     ],
-                    output='screen',
+                    output='both',   # also into ~/.ros/log, so a spawn failure's reason is kept
                 ),
 
                 # SLAM
